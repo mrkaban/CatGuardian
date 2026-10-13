@@ -1,6 +1,6 @@
 # CatGuardian
 Cat Guardian
 
-Переписываю на C# с расширением функционала, поэтому скоро будет опубликовано с исходным кодом
+I'm rewriting it in C# with expanded functionality, so it will be published with the source code soon.
 
-Подробнее на официальном сайте https://alekseycheremnykh.ru/post/cat-guardian/
+Read more on the official website https://alekseycheremnykh.ru/post/cat-guardian/
