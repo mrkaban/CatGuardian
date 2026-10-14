@@ -1,0 +1,65 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- Тема: Тёмная синяя -->
+    <Color x:Key="BgColor">#0A1020</Color>
+    <Color x:Key="PanelColor">#101A33</Color>
+    <Color x:Key="PanelAltColor">#182441</Color>
+    <Color x:Key="BorderColor">#2E4472</Color>
+    <!-- 3.0.0.18: чуть ярче приглушённый текст (контраст против панелей в тёмной теме). -->
+    <Color x:Key="TextColor">#EAF1FF</Color>
+    <Color x:Key="MutedTextColor">#ADBEE0</Color>
+    <Color x:Key="AccentColor">#3D7BFD</Color>
+    <Color x:Key="AccentHoverColor">#5B94FF</Color>
+    <Color x:Key="AccentSoftColor">#14223F</Color>
+    <Color x:Key="AccentTextColor">#FFFFFF</Color>
+    <Color x:Key="GreenColor">#31C48D</Color>
+    <Color x:Key="AmberColor">#F0B429</Color>
+    <Color x:Key="RedColor">#F05252</Color>
+    <Color x:Key="SelectionColor">#3D7BFD</Color>
+    <Color x:Key="HeaderColor">#0D1629</Color>
+
+    <!-- Расширенный набор кистей для полного покрытия всех контролов -->
+    <Color x:Key="InputBgColor">#101A33</Color>
+    <Color x:Key="HoverBgColor">#1B2A4C</Color>
+    <Color x:Key="RowStripeColor">#121E3A</Color>
+    <Color x:Key="ScrollThumbColor">#2F4370</Color>
+    <Color x:Key="ScrollTrackColor">#17233F</Color>
+    <Color x:Key="FocusBorderColor">#3D7BFD</Color>
+    <Color x:Key="DangerSoftColor">#2E1A22</Color>
+    <Color x:Key="SuccessSoftColor">#122B23</Color>
+    <Color x:Key="WarningSoftColor">#2B2614</Color>
+    <Color x:Key="TabSelectedColor">#101A33</Color>
+    <Color x:Key="MenuBgColor">#182441</Color>
+    <Color x:Key="DisabledTextColor">#7E90BC</Color>
+
+    <SolidColorBrush x:Key="BgBrush" Color="{StaticResource BgColor}"/>
+    <SolidColorBrush x:Key="PanelBrush" Color="{StaticResource PanelColor}"/>
+    <SolidColorBrush x:Key="PanelAltBrush" Color="{StaticResource PanelAltColor}"/>
+    <SolidColorBrush x:Key="BorderBrush" Color="{StaticResource BorderColor}"/>
+    <SolidColorBrush x:Key="TextBrush" Color="{StaticResource TextColor}"/>
+    <SolidColorBrush x:Key="MutedBrush" Color="{StaticResource MutedTextColor}"/>
+    <SolidColorBrush x:Key="AccentBrush" Color="{StaticResource AccentColor}"/>
+    <SolidColorBrush x:Key="AccentHoverBrush" Color="{StaticResource AccentHoverColor}"/>
+    <SolidColorBrush x:Key="AccentSoftBrush" Color="{StaticResource AccentSoftColor}"/>
+    <SolidColorBrush x:Key="AccentTextBrush" Color="{StaticResource AccentTextColor}"/>
+    <SolidColorBrush x:Key="GreenBrush" Color="{StaticResource GreenColor}"/>
+    <SolidColorBrush x:Key="AmberBrush" Color="{StaticResource AmberColor}"/>
+    <SolidColorBrush x:Key="RedBrush" Color="{StaticResource RedColor}"/>
+    <SolidColorBrush x:Key="SelectionBrush" Color="{StaticResource SelectionColor}"/>
+    <SolidColorBrush x:Key="HeaderBrush" Color="{StaticResource HeaderColor}"/>
+
+    <SolidColorBrush x:Key="InputBgBrush" Color="{StaticResource InputBgColor}"/>
+    <SolidColorBrush x:Key="HoverBgBrush" Color="{StaticResource HoverBgColor}"/>
+    <SolidColorBrush x:Key="RowStripeBrush" Color="{StaticResource RowStripeColor}"/>
+    <SolidColorBrush x:Key="ScrollThumbBrush" Color="{StaticResource ScrollThumbColor}"/>
+    <SolidColorBrush x:Key="ScrollTrackBrush" Color="{StaticResource ScrollTrackColor}"/>
+    <SolidColorBrush x:Key="FocusBorderBrush" Color="{StaticResource FocusBorderColor}"/>
+    <SolidColorBrush x:Key="DangerSoftBrush" Color="{StaticResource DangerSoftColor}"/>
+    <SolidColorBrush x:Key="SuccessSoftBrush" Color="{StaticResource SuccessSoftColor}"/>
+    <SolidColorBrush x:Key="WarningSoftBrush" Color="{StaticResource WarningSoftColor}"/>
+    <SolidColorBrush x:Key="TabSelectedBrush" Color="{StaticResource TabSelectedColor}"/>
+    <SolidColorBrush x:Key="MenuBgBrush" Color="{StaticResource MenuBgColor}"/>
+    <SolidColorBrush x:Key="DisabledTextBrush" Color="{StaticResource DisabledTextColor}"/>
+
+</ResourceDictionary>
