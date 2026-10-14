@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>CatGuardian.Antivirus</RootNamespace>
+    <AssemblyName>CatGuardian.Antivirus</AssemblyName>
+  </PropertyGroup>
+
+  <!-- Движок антивируса на ClamAV: ядро + обёртки clamscan/clamd/freshclam (без внешних пакетов, BCL-only). -->
+
+  <!-- 3.0.0.45 (фикс первопричины WMI): WmiSubscriptionScanner читает root\subscription через
+       System.Management (ManagementObjectSearcher) нативно. Late-binding WbemScripting
+       (SWbemObjectSet.Item) в этой среде не работает («Ошибка клиента») — объекты считались,
+       но не анализировались. Пакет уже используется службой (DnsGovernor) и лежит в local-nuget. -->
+  <ItemGroup>
+    <PackageReference Include="System.Management" Version="8.0.0" />
+    <ProjectReference Include="..\CatGuardian.Localization\CatGuardian.Localization.csproj" />
+  </ItemGroup>
+
+  <!-- 3.0.0.56 (SCM): UserContextPaths (резолв профилей реальных пользователей от SYSTEM)
+       живёт в CatGuardian.Data — общий для службы/антивируса/инспектора целостности. -->
+  <ItemGroup>
+    <ProjectReference Include="..\CatGuardian.Data\CatGuardian.Data.csproj" />
+  </ItemGroup>
+
+  <!-- 3.0.0.61 (WMI event-watch): юнит-тесты маркеров WmiSubscriptionScanner (Analyze). -->
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>CatGuardian.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+  <!-- 3.0.0.68: паттерны угроз (домены пулов, CLI-маркеры) лежат ВНЕ сборки в data-файле —
+       открытые строковые сигнатуры в DLL провоцировали ложные детекты антивирусов.
+       Файл копируется рядом со сборкой (data\threat_patterns.json) и транзитивно
+       в output тестов через ProjectReference. -->
+  <ItemGroup>
+    <Content Include="..\..\data\threat_patterns.json"
+             Link="data\threat_patterns.json"
+             CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>
