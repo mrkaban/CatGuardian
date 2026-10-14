@@ -2,6 +2,8 @@
 
 Cat Guardian is a comprehensive real-time protection suite for Windows PCs. The program pairs the ClamAV scanning engine with advanced integrity monitoring of critical system files and the registry, firewall management backed by threat intelligence feeds, and a resident antivirus scanner with heuristic analysis.
 
+You can read more details on the official website (Russian language): https://alekseycheremnykh.ru/post/cat-guardian/
+
 Main Capabilities
 -----------------
 
@@ -15,6 +17,10 @@ Main Capabilities
 - Quarantine and automatic database updates
 - Self-defense mechanisms: file locking, registry protection, anti-kill filter
 - First-run wizard, UI themes, Russian and English localization
+
+Demonstration of antivirus operation
+-----------------
+You can watch the Cat Guardian in action in the video via the following link: https://www.youtube.com/watch?v=m-J2h0lQT4U
 
 Why a commercial antivirus is better than a free one
 -------------------
