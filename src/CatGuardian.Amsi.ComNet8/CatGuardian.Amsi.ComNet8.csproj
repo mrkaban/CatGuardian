@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- COM-обёртка AMSI-провайдера для .NET 8 (EnableComHosting): регистрируется через
+         comhost.dll (DllRegisterServer поддерживается в .NET 5+), холодный старт ускоряется
+         ReadyToRun-компиляцией при публикации (аналог ngen для .NET Core, п.1 концепта).
+         Покрывает AMSI-хосты на .NET Core: PowerShell 7 (pwsh). -->
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <EnableComHosting>true</EnableComHosting>
+    <RootNamespace>CatGuardian.Amsi.ComNet8</RootNamespace>
+    <AssemblyName>CatGuardian.Amsi.ComNet8</AssemblyName>
+    <PlatformTarget>x64</PlatformTarget>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\CatGuardian.Amsi\CatGuardian.Amsi.csproj" />
+  </ItemGroup>
+
+  <!-- Тестовый проект CatGuardian.Tests.Amsi: прямой доступ к internal AmsiStreamReader
+       (стратегии чтения/Decode) без побочных эффектов на реальный конфиг машины. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="CatGuardian.Tests.Amsi" />
+  </ItemGroup>
+
+</Project>
