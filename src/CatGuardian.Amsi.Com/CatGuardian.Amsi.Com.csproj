@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- COM-обёртка AMSI-провайдера для .NET Framework (net40, CLR 4.x):
+         регистрируется через mscoree.dll (встроенный .NET хост), холодный старт
+         ускоряется ngen-образом (п.1 архитектурного концепта).
+         Покрывает AMSI-хосты: Windows PowerShell 5.1, Office VBA, cscript/wscript.
+         Используется системный .NET 4.0 targeting pack (офлайн-сборка без NuGet-пакетов). -->
+    <TargetFramework>net40</TargetFramework>
+    <RootNamespace>CatGuardian.Amsi.Com</RootNamespace>
+    <AssemblyName>CatGuardian.Amsi.Com</AssemblyName>
+    <PlatformTarget>x64</PlatformTarget>
+    <RegisterForComInterop>false</RegisterForComInterop>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- SetTargetFramework: явно выбираем net40-таргет ядра (иначе MSBuild берёт net8.0). -->
+    <ProjectReference Include="..\CatGuardian.Amsi\CatGuardian.Amsi.csproj" SetTargetFramework="TargetFramework=net40" />
+  </ItemGroup>
+
+  <!-- Тестовый проект CatGuardian.Tests.Amsi: прямой доступ к internal AmsiStreamReader
+       (стратегии чтения/Decode) — контракт net40 идентичен net8, тесты закрывают его зеркально. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="CatGuardian.Tests.Amsi" />
+  </ItemGroup>
+
+</Project>

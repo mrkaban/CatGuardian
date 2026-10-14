@@ -1,0 +1,8 @@
+is_global = true
+build_property.RootNamespace = CatGuardian.Amsi.Com
+build_property.ProjectDir = d:\Cat Guardian\3.0\3.0.1.5\src\CatGuardian.Amsi.Com\
+build_property.EnableComHosting = 
+build_property.EnableGeneratedComInterfaceComImportInterop = 
+build_property.CsWinRTUseWindowsUIXamlProjections = false
+build_property.EffectiveAnalysisLevelStyle = 
+build_property.EnableCodeStyleSeverity = 
