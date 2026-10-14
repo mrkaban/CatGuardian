@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <RootNamespace>CatGuardian.Privileged</RootNamespace>
+    <AssemblyName>CatGuardian.Privileged</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <NoWarn>$(NoWarn);CS1591;CA1416</NoWarn>
+  </PropertyGroup>
+
+  <!-- 3.0.0.45 (фикс удаления WMI): DeleteWmiObject переведён на System.Management.
+       COM late-binding (SWbemObjectSet.Item) в этой среде не работает («Ошибка клиента») —
+       пакет уже используется службой и лежит в local-nuget (офлайн-фид NuGet.config). -->
+  <ItemGroup>
+    <PackageReference Include="System.Management" Version="8.0.0" />
+    <!-- 3.0.0.56 (SCM): операции SCM-службы делегируются ServiceManager (Data). -->
+    <ProjectReference Include="..\CatGuardian.Data\CatGuardian.Data.csproj" />
+  </ItemGroup>
+
+</Project>
