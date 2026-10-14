@@ -1,0 +1,81 @@
+{
+  "format": 1,
+  "restore": {
+    "d:\\Cat Guardian\\3.0\\3.0.1.5\\src\\CatGuardian.Localization\\CatGuardian.Localization.csproj": {}
+  },
+  "projects": {
+    "d:\\Cat Guardian\\3.0\\3.0.1.5\\src\\CatGuardian.Localization\\CatGuardian.Localization.csproj": {
+      "version": "3.0.1.5",
+      "restore": {
+        "projectUniqueName": "d:\\Cat Guardian\\3.0\\3.0.1.5\\src\\CatGuardian.Localization\\CatGuardian.Localization.csproj",
+        "projectName": "CatGuardian.Localization",
+        "projectPath": "d:\\Cat Guardian\\3.0\\3.0.1.5\\src\\CatGuardian.Localization\\CatGuardian.Localization.csproj",
+        "packagesPath": "C:\\Users\\user\\.nuget\\packages\\",
+        "outputPath": "d:\\Cat Guardian\\3.0\\3.0.1.5\\src\\CatGuardian.Localization\\obj\\",
+        "projectStyle": "PackageReference",
+        "fallbackFolders": [
+          "F:\\Microsoft Visual Studio\\Shared\\NuGetPackages"
+        ],
+        "configFilePaths": [
+          "d:\\Cat Guardian\\3.0\\3.0.1.5\\NuGet.Config",
+          "C:\\Users\\user\\AppData\\Roaming\\NuGet\\NuGet.Config",
+          "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.FallbackLocation.config",
+          "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.Offline.config"
+        ],
+        "originalTargetFrameworks": [
+          "net8.0"
+        ],
+        "sources": {
+          "C:\\Program Files\\dotnet\\library-packs": {},
+          "d:\\Cat Guardian\\3.0\\3.0.1.5\\local-nuget": {}
+        },
+        "frameworks": {
+          "net8.0": {
+            "framework": "net8.0",
+            "targetAlias": "net8.0",
+            "projectReferences": {}
+          }
+        },
+        "warningProperties": {
+          "warnAsError": [
+            "NU1605"
+          ]
+        },
+        "restoreAuditProperties": {
+          "enableAudit": "false",
+          "auditLevel": "low",
+          "auditMode": "direct"
+        },
+        "SdkAnalysisLevel": "10.0.400"
+      },
+      "frameworks": {
+        "net8.0": {
+          "framework": "net8.0",
+          "targetAlias": "net8.0",
+          "imports": [
+            "net461",
+            "net462",
+            "net47",
+            "net471",
+            "net472",
+            "net48",
+            "net481"
+          ],
+          "assetTargetFallback": true,
+          "warn": true,
+          "frameworkReferences": {
+            "Microsoft.NETCore.App": {
+              "privateAssets": "all"
+            }
+          },
+          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\10.0.401/PortableRuntimeIdentifierGraph.json"
+        }
+      },
+      "runtimes": {
+        "win-x64": {
+          "#import": []
+        }
+      }
+    }
+  }
+}

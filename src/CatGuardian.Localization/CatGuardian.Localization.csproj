@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- 3.0.0.92: общая локализация комплекса (панель + хост трея).
+         Русский — основной язык программы (Strings.resx), английский —
+         дополнительный перевод (Strings.en.resx). Никаких внешних зависимостей. -->
+    <NeutralLanguage>ru</NeutralLanguage>
+    <RootNamespace>CatGuardian.Localization</RootNamespace>
+  </PropertyGroup>
+
+</Project>
