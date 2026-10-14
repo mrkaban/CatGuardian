@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Ядро AMSI-инспекции: мультитаргет.
+         net40 — для COM-обёртки через mscoree.dll (ngen, PowerShell 5.1/Office/cscript).
+           Используется ТОЛЬКО .NET 4.0 targeting pack, установленный в системе офлайн
+           (v4.8/netstandard2.0 пакеты недоступны в локальном фиде) — см. plan-3.0.0.25.md.
+         net8.0 — для COM-обёртки net8 (EnableComHosting, ReadyToRun, PowerShell 7) и тестов.
+         Directory.Build.props задаёт TargetFramework=net8.0 по умолчанию — здесь переопределяем. -->
+    <TargetFrameworks>net40;net8.0</TargetFrameworks>
+    <RootNamespace>CatGuardian.Amsi</RootNamespace>
+    <AssemblyName>CatGuardian.Amsi</AssemblyName>
+  </PropertyGroup>
+
+</Project>

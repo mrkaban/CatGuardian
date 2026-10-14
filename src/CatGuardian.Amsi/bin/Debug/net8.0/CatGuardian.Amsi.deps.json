@@ -1,0 +1,23 @@
+{
+  "runtimeTarget": {
+    "name": ".NETCoreApp,Version=v8.0",
+    "signature": ""
+  },
+  "compilationOptions": {},
+  "targets": {
+    ".NETCoreApp,Version=v8.0": {
+      "CatGuardian.Amsi/3.0.1.5": {
+        "runtime": {
+          "CatGuardian.Amsi.dll": {}
+        }
+      }
+    }
+  },
+  "libraries": {
+    "CatGuardian.Amsi/3.0.1.5": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    }
+  }
+}
