@@ -1,0 +1,82 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <RootNamespace>CatGuardian.UI</RootNamespace>
+    <AssemblyName>CatGuardian</AssemblyName>
+    <ApplicationIcon>Resources\app.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <NoWarn>$(NoWarn);CS1591;CA1416</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\CatGuardian.Integrity\CatGuardian.Integrity.csproj" />
+    <ProjectReference Include="..\CatGuardian.Antivirus\CatGuardian.Antivirus.csproj" />
+    <ProjectReference Include="..\CatGuardian.Firewall\CatGuardian.Firewall.csproj" />
+    <ProjectReference Include="..\CatGuardian.Data\CatGuardian.Data.csproj" />
+    <!-- 3.0.0.92: локализация интерфейса (LanguageService + Tr + RESX ru/en). -->
+    <ProjectReference Include="..\CatGuardian.Localization\CatGuardian.Localization.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Ресурсы дашборда: картинки кота по статусам (сплю / ищу вредителей / нашла вредителя).
+         cat_guard.png больше не используется — заменён на набор cat_sleep/scan/found. -->
+    <Resource Include="Resources\app.ico" />
+    <Resource Include="Resources\cat_sleep.png" />
+    <Resource Include="Resources\cat_scan.png" />
+    <Resource Include="Resources\cat_found.png" />
+  </ItemGroup>
+
+  <!-- UseWindowsForms подмешивает глобальный using System.Windows.Forms,
+       из-за чего UserControl/Application становятся неоднозначными (WPF vs WinForms).
+       Убираем глобальное, оставляя явные using в файлах трея и диалогов. -->
+  <ItemGroup>
+    <Using Remove="System.Windows.Forms" />
+  </ItemGroup>
+
+  <!-- Каталог ClamAV копируем в bin рядом с панелью, чтобы запуск из bin (Debug/Release,
+       автотесты) работал так же, как из publish: без него каталог ClamAV не определяется
+       и сигнатуры на главной не отображаются. -->
+  <Target Name="CopyClamAvAfterBuild" AfterTargets="Build">
+    <ItemGroup>
+      <_ClamAvFiles Include="..\..\clamav\**\*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_ClamAvFiles)"
+          DestinationFolder="$(TargetDir)\tools\clamav\%(RecursiveDir)"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+  <!-- Каталог службы должен лежать РЯДОМ с панелью: StartService() ищет
+       CatGuardian.Service.exe в своей папке (#6). После обычной сборки (Debug/Release)
+       копируем все выходные файлы службы (включая TraceEvent для ETW-детекта) в выходной
+       каталог панели — так же, как build-publish.bat публикует обе программы в одну папку. -->
+  <Target Name="CopyServiceAfterBuild" AfterTargets="Build">
+    <ItemGroup>
+      <!-- pdb исключаем: они не нужны в bin панели, а при параллельной сборке файл может
+           временно отсутствовать (гонка с компиляцией службы) — это валило MSB3030. -->
+      <_ServiceFiles Include="..\CatGuardian.Service\bin\$(Configuration)\net8.0-windows\**\*"
+                     Exclude="..\CatGuardian.Service\bin\$(Configuration)\net8.0-windows\*.pdb"
+                     Condition="Exists('..\CatGuardian.Service\bin\$(Configuration)\net8.0-windows\CatGuardian.Service.exe')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_ServiceFiles)"
+          DestinationFolder="$(OutDir)%(RecursiveDir)"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+  <!-- Привилегированная утилита (3.0.0.7): лежит РЯДОМ с панелью, чтобы служба/панель могли
+       запускать её через Verb=runas для удаления записей автозагрузки из HKLM и задач. -->
+  <Target Name="CopyPrivilegedAfterBuild" AfterTargets="Build">
+    <ItemGroup>
+      <_PrivilegedFiles Include="..\CatGuardian.Privileged\bin\$(Configuration)\net8.0-windows\**\*"
+                        Exclude="..\CatGuardian.Privileged\bin\$(Configuration)\net8.0-windows\*.pdb"
+                        Condition="Exists('..\CatGuardian.Privileged\bin\$(Configuration)\net8.0-windows\CatGuardian.Privileged.exe')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_PrivilegedFiles)"
+          DestinationFolder="$(OutDir)%(RecursiveDir)"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>
