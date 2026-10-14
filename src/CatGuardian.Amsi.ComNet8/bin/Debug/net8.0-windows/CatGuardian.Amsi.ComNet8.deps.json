@@ -1,0 +1,39 @@
+{
+  "runtimeTarget": {
+    "name": ".NETCoreApp,Version=v8.0",
+    "signature": ""
+  },
+  "compilationOptions": {},
+  "targets": {
+    ".NETCoreApp,Version=v8.0": {
+      "CatGuardian.Amsi.ComNet8/3.0.1.2": {
+        "dependencies": {
+          "CatGuardian.Amsi": "3.0.1.2"
+        },
+        "runtime": {
+          "CatGuardian.Amsi.ComNet8.dll": {}
+        }
+      },
+      "CatGuardian.Amsi/3.0.1.2": {
+        "runtime": {
+          "CatGuardian.Amsi.dll": {
+            "assemblyVersion": "3.0.1.2",
+            "fileVersion": "3.0.1.2"
+          }
+        }
+      }
+    }
+  },
+  "libraries": {
+    "CatGuardian.Amsi.ComNet8/3.0.1.2": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    },
+    "CatGuardian.Amsi/3.0.1.2": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    }
+  }
+}
