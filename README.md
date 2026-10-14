@@ -2,12 +2,10 @@
 
 Cat Guardian is a comprehensive real-time protection suite for Windows PCs. The program pairs the ClamAV scanning engine with advanced integrity monitoring of critical system files and the registry, firewall management backed by threat intelligence feeds, and a resident antivirus scanner with heuristic analysis.
 
-Read more on the official website https://alekseycheremnykh.ru/post/cat-guardian/
-
 Main Capabilities
 -----------------
 
-- Resident antivirus scanner with the ClamAV engine and heuristic monitoring
+- Resident antivirus scanner powered by the ClamAV engine with automatic signature updates, an instant malware hash index (built from ClamAV signature databases) for immediate detection, and in-house heuristic analysis (entropy, behavior, reputation)
 - Advanced integrity control of critical Windows files and the registry (File Inspector)
 - Windows Firewall management with Threat Intelligence databases
 - Proactive protection against ransomware, cryptojacking, credential theft, keyloggers, screen lockers, script-based attacks (AMSI), WMI abuse, LOLBins, DLL hijacking and fileless malware
