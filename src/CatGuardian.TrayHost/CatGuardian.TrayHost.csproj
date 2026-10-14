@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <RootNamespace>CatGuardian.TrayHost</RootNamespace>
+    <!-- 3.0.0.58-trayhost: AssemblyName = имя ПРОЦЕССА (критично для авторизации
+         IsTrustedTrayHost — ProcessName должен быть «CatGuardian.TrayHost»). -->
+    <AssemblyName>CatGuardian.TrayHost</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Resources\app.ico</ApplicationIcon>
+    <NoWarn>$(NoWarn);CS1591;CA1416</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\CatGuardian.Integrity\CatGuardian.Integrity.csproj" />
+    <ProjectReference Include="..\CatGuardian.Data\CatGuardian.Data.csproj" />
+    <!-- 3.0.0.92: локализация меню/баллунов/попапов трея (LanguageService + Tr). -->
+    <ProjectReference Include="..\CatGuardian.Localization\CatGuardian.Localization.csproj" />
+    <!-- 3.0.0.63: переиспользуем чистый детектор чувствительных данных (ClipboardSensitiveDetector)
+         для наблюдателя буфера в интерактивной сессии. -->
+    <ProjectReference Include="..\CatGuardian.Antivirus\CatGuardian.Antivirus.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Resource Include="Resources\app.ico" />
+  </ItemGroup>
+
+</Project>
