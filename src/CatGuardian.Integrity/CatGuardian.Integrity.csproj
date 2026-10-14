@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>CatGuardian.Integrity</RootNamespace>
+    <AssemblyName>CatGuardian.Integrity</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- SQLite для эталонов, событий, IOC, приманок и конфигурации -->
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.12" />
+    <!-- ETW для детекта реального доступа (чтения/открытия) к файлам-приманкам -->
+    <PackageReference Include="Microsoft.Diagnostics.Tracing.TraceEvent" Version="3.2.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Резидентный модуль (Monitor) собирается отдельно как часть CatGuardian.Service,
+         поэтому исключаем его из библиотеки движка инспектора. -->
+    <Compile Remove="Resident\**\*.cs" />
+    <Page Remove="Resident\**\*.xaml" />
+    <None Remove="Resident\**\*" />
+  </ItemGroup>
+
+  <!-- 3.0.0.56 (SCM): UserContextPaths (резолв профилей реальных пользователей от SYSTEM). -->
+  <ItemGroup>
+    <ProjectReference Include="..\CatGuardian.Data\CatGuardian.Data.csproj" />
+  </ItemGroup>
+
+</Project>
