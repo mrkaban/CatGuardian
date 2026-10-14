@@ -1,0 +1,99 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <RootNamespace>CatGuardian.Service</RootNamespace>
+    <AssemblyName>CatGuardian.Service</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Resources\app.ico</ApplicationIcon>
+    <NoWarn>$(NoWarn);CS1591;CA1416</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 3.0.0.56 (SCM): ServiceBase/ServiceController для режима Windows-службы.
+         10.0.11 — минимальная версия, реально присутствующая в доступном фиде (NU1603). -->
+    <PackageReference Include="System.ServiceProcess.ServiceController" Version="10.0.11" />
+    <!-- 3.0.0.19 (модуль «DNS»): штатная обёртка Microsoft над WMI. COM-interop
+         WbemScripting через reflection в этой среде не работает (SWbemObjectSet.Item/
+         _NewEnum недоступны), System.Management решает это нативно. -->
+    <PackageReference Include="System.Management" Version="8.0.0" />
+    <ProjectReference Include="..\CatGuardian.Integrity\CatGuardian.Integrity.csproj" />
+    <ProjectReference Include="..\CatGuardian.Localization\CatGuardian.Localization.csproj" />
+    <ProjectReference Include="..\CatGuardian.Antivirus\CatGuardian.Antivirus.csproj" />
+    <ProjectReference Include="..\CatGuardian.Data\CatGuardian.Data.csproj" />
+    <!-- 3.0.0.14: сетевая эвристика брандмауэра использует TrafficMonitor (iphlpapi) и
+         WindowsFirewallEngine (COM HNetCfg.FwPolicy2) из CatGuardian.Firewall. -->
+    <ProjectReference Include="..\CatGuardian.Firewall\CatGuardian.Firewall.csproj" />
+    <!-- 3.0.0.25: ядро AMSI-инспекции (константы провайдера, маппинг AMSI_RESULT) —
+         регистратор использует CatGuardian.Amsi.Core.AmsiConstants. -->
+    <ProjectReference Include="..\CatGuardian.Amsi\CatGuardian.Amsi.csproj" />
+    <!-- 3.0.0.14: EventLogWatcher/EventRecord (контроль правил брандмауэра, Event ID 2004)
+         лежат в Windows Desktop Runtime (System.Diagnostics.EventLog). -->
+    <FrameworkReference Include="Microsoft.WindowsDesktop.App" />
+  </ItemGroup>
+
+  <!-- 3.0.0.7: задачи Планировщика Windows читаются через нативный COM-интероп
+       TaskScheduler 1.1 (Schedule.Service, late binding через dynamic) — см. TaskSchedulerReader.cs.
+       Внешний NuGet-пакет не используется: доступный фид не содержит полноценной сборки. -->
+
+  <ItemGroup>
+    <Resource Include="Resources\app.ico" />
+  </ItemGroup>
+
+  <!-- 3.0.0.68: Песочница (AppContainer/Restricted-Token) возвращена — эксперимент E1b
+       показал, что она НЕ виновник Kaspersky HEUR:Trojan.Win32.Generic (виновники:
+       анти-майнер и WindowsDefenderManager, см. plans/plan-3.0.0.68.md). Исключается
+       только при явном флаге эксперимента (EnableSandbox=true). -->
+  <ItemGroup Condition="'$(EnableSandbox)' == 'true'">
+    <Compile Remove="SandboxMonitor.cs" />
+    <Compile Remove="Sandbox\**\*.cs" />
+  </ItemGroup>
+
+  <!-- 3.0.0.68: AnomalyControlMonitor возвращён — встроенный YARA-рулсет вынесен
+       из кода в data\memory_rules.yar (эксперимент E1c; рулсет был одним из
+       Kaspersky-триггеров). Исключается только при EnableAnomaly=true. -->
+  <ItemGroup Condition="'$(EnableAnomaly)' == 'true'">
+    <Compile Remove="AnomalyControlMonitor.cs" />
+  </ItemGroup>
+
+  <!-- 3.0.0.68: WmiSubscriptionMonitor возвращён — эксперимент E1d показал, что
+       событийный ManagementEventWatcher не является виновником HEUR-детекта
+       (WQL-запросы строятся в рантайме, открытых строк в DLL нет).
+       Исключается только при EnableWmiMonitor=true. -->
+  <ItemGroup Condition="'$(EnableWmiMonitor)' == 'true'">
+    <Compile Remove="WmiSubscriptionMonitor.cs" />
+  </ItemGroup>
+
+  <!-- 3.0.0.68 (безопасная редакция Defender): Engine/WindowsDefenderManager собран
+       БЕЗ встроенных PowerShell-команд (статус = WMI/реестр, исключения = реестр,
+       каскад disable/enable = внешний data\defender_ctl.ps1). Исключается из сборки
+       только при явном флаге эксперимента (EnableDefenderManager=true). -->
+  <ItemGroup Condition="'$(EnableDefenderManager)' == 'true'">
+    <Compile Remove="Engine\WindowsDefenderManager.cs" />
+  </ItemGroup>
+
+  <!-- 3.0.0.68: каскад отключения/включения Windows Defender вынесен из DLL
+       в data-файл (ложные HEUR-детекты Kaspersky, эксперимент E1e). Копируется
+       рядом со сборкой в подкаталог data\. -->
+  <ItemGroup>
+    <Content Include="..\..\data\defender_ctl.ps1" Link="data\defender_ctl.ps1"
+             CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\data\memory_rules.yar" Link="data\memory_rules.yar"
+             CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!-- Привилегированная утилита (3.0.0.7): должна лежать РЯДОМ со службой, чтобы
+       «Удалить из автозагрузки» для HKLM/задач работало и при запуске службы без панели. -->
+  <Target Name="CopyPrivilegedToService" AfterTargets="Build">
+    <ItemGroup>
+      <_PrivilegedFiles Include="..\CatGuardian.Privileged\bin\$(Configuration)\net8.0-windows\**\*"
+                        Exclude="..\CatGuardian.Privileged\bin\$(Configuration)\net8.0-windows\*.pdb"
+                        Condition="Exists('..\CatGuardian.Privileged\bin\$(Configuration)\net8.0-windows\CatGuardian.Privileged.exe')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_PrivilegedFiles)"
+          DestinationFolder="$(OutDir)%(RecursiveDir)"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>
