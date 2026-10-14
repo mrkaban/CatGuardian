@@ -1,0 +1,138 @@
+﻿<UserControl x:Class="CatGuardian.UI.Views.SettingsView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:loc="clr-namespace:CatGuardian.UI.Localization"
+             xmlns:views="clr-namespace:CatGuardian.UI.Views.Exceptions">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel MaxWidth="820" HorizontalAlignment="Left" Margin="8">
+            <TextBlock Style="{StaticResource PageTitle}" Text="{loc:Loc Settings.PageTitle}"/>
+            <TextBlock Foreground="{DynamicResource MutedBrush}" Margin="0,4,0,18"
+                       Text="{loc:Loc Settings.PageSubtitle}"/>
+
+            <!-- 3.0.0.92: блок «Локализация и интерфейс» перенесён в самый верх общих настроек.
+                 Язык применяется сразу (loc:Loc пере-переводит открытые окна); хост трея и
+                 новые уведомления службы переходят на выбранный язык без перезапуска. -->
+            <Border Style="{StaticResource Card}">
+                <StackPanel>
+                    <TextBlock Style="{StaticResource SectionTitleUpper}" Text="{loc:Loc Settings.SectionLocalization}"/>
+                    <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                        <TextBlock Text="{loc:Loc Settings.LanguageLabel}" Width="150" Foreground="{DynamicResource MutedBrush}" VerticalAlignment="Center"/>
+                        <ComboBox x:Name="LanguageBox" Width="180" SelectionChanged="OnLanguageChanged">
+                            <ComboBoxItem Content="{loc:Loc Settings.LanguageRu}"/>
+                            <ComboBoxItem Content="{loc:Loc Settings.LanguageEn}"/>
+                        </ComboBox>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                        <TextBlock Text="{loc:Loc Settings.ThemeLabel}" Width="150" Foreground="{DynamicResource MutedBrush}" VerticalAlignment="Center"/>
+                        <ComboBox x:Name="ThemeBox" Width="240" SelectionChanged="OnThemeChanged">
+                            <ComboBoxItem Content="{loc:Loc Settings.ThemeLight}"/>
+                            <ComboBoxItem Content="{loc:Loc Settings.ThemeLightBlue}"/>
+                            <ComboBoxItem Content="{loc:Loc Settings.ThemeLightGreen}"/>
+                            <ComboBoxItem Content="{loc:Loc Settings.ThemeDark}"/>
+                            <ComboBoxItem Content="{loc:Loc Settings.ThemeDarkBlue}"/>
+                            <ComboBoxItem Content="{loc:Loc Settings.ThemeDarkContrast}"/>
+                        </ComboBox>
+                    </StackPanel>
+                    <TextBlock Foreground="{DynamicResource MutedBrush}" Margin="0,14,0,0"
+                               FontSize="12" TextWrapping="Wrap"
+                               Text="{loc:Loc Settings.AutoApplyNote}"/>
+                </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource Card}">
+                <StackPanel>
+                    <TextBlock Style="{StaticResource SectionTitleUpper}" Text="{loc:Loc Settings.SectionSystem}"/>
+                    <!-- 3.0.0.98: повторный запуск мастера первого запуска. 3.0.1.4: кнопка
+                         первая в блоке — мастер настраивает весь комплекс, поэтому он выше
+                         отдельных переключателей. -->
+                    <Button Content="{loc:Loc Settings.RunWizard}" Margin="0,10,0,0"
+                            Padding="12,6" HorizontalAlignment="Left" FontSize="13"
+                            Click="OnRunWizardClick"/>
+                    <TextBlock Foreground="{DynamicResource MutedBrush}" Margin="0,4,0,0" FontSize="12" TextWrapping="Wrap"
+                               Text="{loc:Loc Settings.RunWizardHint}"/>
+                    <!-- 3.0.0.18: чекбокс «Сворачивать в трей при закрытии» удалён — окно всегда
+                         сворачивается в трей, а резидентный мониторинг работает независимо от панели. -->
+                    <!-- 3.0.0.60-fix (итерация 4): слово «комплекс» убрано (замечание пользователя). -->
+                    <CheckBox x:Name="AutoStartBox" Content="{loc:Loc Settings.AutoStart}" Margin="0,10,0,2"
+                              Checked="OnAutoStartChanged" Unchecked="OnAutoStartChanged"/>
+                    <!-- 3.0.0.58-trayhost-fix: снятие галочки = полное отключение АВТОЗАПУСКА.
+                         Служба переводится в Start=demand (при загрузке Windows ничего не стартует:
+                         ни служба, ни TrayHost, ни панель), задача планировщика и HKCU Run удаляются.
+                         Пока панель открыта, мониторинг продолжает работать. -->
+                    <TextBlock Foreground="{DynamicResource MutedBrush}" Margin="0,0,0,6" FontSize="12" TextWrapping="Wrap"
+                               Text="{loc:Loc Settings.AutoStartHint}"/>
+                    <CheckBox x:Name="ToastBox" Content="{loc:Loc Settings.Toasts}" Margin="0,10,0,2"
+                              Checked="OnToastChanged" Unchecked="OnToastChanged"/>
+                    <!-- 3.0.1.3-fix: чекбокс «Интеграция в Проводник» из общих настроек удалён —
+                         единственная рабочая точка — вкладка «Антивирус → Сканер» (ChkCtxMenuIntegration). -->
+                    <!-- 3.0.0.59: отключение антивируса Windows Defender (галочка в общих настройках).
+                         Отключается ТОЛЬКО антивирусная часть Defender; брандмауэр Windows не трогается.
+                         Применяется при нажатии «Сохранить и применить» через IPC-команду службе. -->
+                    <!-- 3.0.0.64: автоприменение — галочка применяется сразу (без кнопки «Сохранить»). -->
+                    <CheckBox x:Name="DefenderDisableBox" Margin="0,6"
+                              Content="{loc:Loc Settings.DefenderDisable}"
+                              Checked="OnDefenderDisableChanged" Unchecked="OnDefenderDisableChanged"/>
+                    <!-- 3.0.0.60-fix (итерация 3, F9): совместимость — исключения Cat Guardian
+                         в Defender. Работает даже при включённой Tamper Protection; применяется
+                         при «Сохранить и применить» (команда ExclusionsOnly службе). Снятие
+                         галочки НЕ удаляет уже добавленные исключения (безвредны). -->
+                    <CheckBox x:Name="DefenderCompatBox" Margin="0,6"
+                              Content="{loc:Loc Settings.DefenderCompat}"
+                              Checked="OnDefenderCompatChanged" Unchecked="OnDefenderCompatChanged"/>
+                    <TextBlock x:Name="DefenderStatusText" Foreground="{DynamicResource MutedBrush}" Margin="0,0,0,6"
+                               FontSize="12" TextWrapping="Wrap"
+                               Text="{loc:Loc Settings.DefenderChecking}"/>
+                    <TextBlock Foreground="{DynamicResource MutedBrush}" Margin="0,0,0,2" FontSize="12" TextWrapping="Wrap"
+                               Text="{loc:Loc Settings.DefenderNote}"/>
+                </StackPanel>
+            </Border>
+
+            <!-- 3.0.0.22: самозащита комплекса (Zero-Overhead Self-Defense):
+                 watchdog на нативных хендлах, файловые хендлы NTFS, RegNotifyChangeKeyValue,
+                 Anti-Kill фильтрация скриптов. Все ключи selfdef_* живут в settings.db. -->
+            <Border Style="{StaticResource Card}" Margin="0,14,0,0">
+                <StackPanel>
+                    <TextBlock Style="{StaticResource SectionTitleUpper}" Text="{loc:Loc Settings.SectionSelfDefense}"/>
+                    <TextBlock Foreground="{DynamicResource MutedBrush}" Margin="0,6,0,2" FontSize="12" TextWrapping="Wrap"
+                               Text="{loc:Loc Settings.SelfDefenseHint}"/>
+                    <CheckBox x:Name="SelfDefWatchdogBox" Margin="0,10,0,2"
+                              Checked="OnSelfDefChanged" Unchecked="OnSelfDefChanged">
+                        <TextBlock TextWrapping="Wrap"
+                                   Text="{loc:Loc Settings.SelfDefWatchdog}"/>
+                    </CheckBox>
+                    <CheckBox x:Name="SelfDefFileLockBox" Margin="0,6,0,2"
+                              Checked="OnSelfDefChanged" Unchecked="OnSelfDefChanged">
+                        <TextBlock TextWrapping="Wrap"
+                                   Text="{loc:Loc Settings.SelfDefFileLock}"/>
+                    </CheckBox>
+                    <CheckBox x:Name="SelfDefRegistryBox" Margin="0,6,0,2"
+                              Checked="OnSelfDefChanged" Unchecked="OnSelfDefChanged">
+                        <TextBlock TextWrapping="Wrap"
+                                   Text="{loc:Loc Settings.SelfDefRegistry}"/>
+                    </CheckBox>
+                    <CheckBox x:Name="SelfDefAntiKillBox" Margin="0,6,0,2"
+                              Checked="OnSelfDefChanged" Unchecked="OnSelfDefChanged">
+                        <TextBlock TextWrapping="Wrap"
+                                   Text="{loc:Loc Settings.SelfDefAntiKill}"/>
+                    </CheckBox>
+                    <CheckBox x:Name="SelfDefRestartPeerBox" Margin="0,6,0,2"
+                              Checked="OnSelfDefChanged" Unchecked="OnSelfDefChanged">
+                        <TextBlock TextWrapping="Wrap"
+                                   Text="{loc:Loc Settings.SelfDefRestartPeer}"/>
+                    </CheckBox>
+                </StackPanel>
+            </Border>
+
+            <!-- 3.0.0.55: раздел «Исключения» — записи, реально исключающие элементы
+                 из проверок модулями (добавлены кнопкой «Доверять» или вручную).
+                 Эталоны и внутренние кэши не отображаются. -->
+            <views:ExceptionsView/>
+
+            <!-- 3.0.0.69: раздел «Чёрный список» — персистентные запреты модулей
+                 (кнопка «Запретить» в алертах), по образцу «Исключений». -->
+            <views:BlacklistView/>
+
+            <!-- 3.0.0.92: карточка «Локализация и интерфейс» перенесена в самый верх страницы. -->
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

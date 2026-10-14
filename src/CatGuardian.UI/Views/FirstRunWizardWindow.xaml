@@ -1,0 +1,295 @@
+<Window x:Class="CatGuardian.UI.Views.FirstRunWizardWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:loc="clr-namespace:CatGuardian.UI.Localization"
+        Title="{loc:Loc Fwz.Title}"
+        Width="780" Height="640"
+        MinWidth="720" MinHeight="560"
+        WindowStartupLocation="CenterScreen"
+        Foreground="{DynamicResource TextBrush}"
+        ResizeMode="CanResize"
+        ShowInTaskbar="True">
+
+    <!-- 3.0.0.98: Мастер первого запуска. Показывается один раз при старте панели
+         (флаг first_run_done), до открытия главного окна. Шаги:
+         0 — приветствие и автозапуск; 1 — настройки антивируса; 2 — проактивная защита
+         (ВСЕ модули, сгруппированные по назначению); 3 — файлы-приманки (зоны размещения);
+         3.0.1.1: 4 — сетевые угрозы (загрузка фидов угроз и применение правил ThreatIntel:*);
+         5 — инспектор файлов и реестра (каталоги, ветки, расширения, уведомления);
+         6 — эталон инспектора файлов («Снять эталон сейчас» / «Позже» → Готово). -->
+
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Заголовок шага -->
+        <TextBlock x:Name="TitleText" FontSize="20" FontWeight="Bold" TextWrapping="Wrap"
+                   Text="{loc:Loc Fwz.HelloTitle}"/>
+        <TextBlock x:Name="SubText" Grid.Row="1" MaxWidth="660" TextWrapping="Wrap"
+                   Foreground="{DynamicResource MutedBrush}" Margin="0,4,0,12"
+                   Text="{loc:Loc Fwz.HelloSub}"/>
+
+        <!-- Индикатор шагов -->
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,14">
+            <Ellipse x:Name="Dot0" Width="9" Height="9" Fill="{DynamicResource AccentBrush}" Margin="0,0,6,0"/>
+            <Ellipse x:Name="Dot1" Width="9" Height="9" Fill="{DynamicResource BorderBrush}" Margin="0,0,6,0"/>
+            <Ellipse x:Name="Dot2" Width="9" Height="9" Fill="{DynamicResource BorderBrush}" Margin="0,0,6,0"/>
+            <Ellipse x:Name="Dot3" Width="9" Height="9" Fill="{DynamicResource BorderBrush}" Margin="0,0,6,0"/>
+            <Ellipse x:Name="Dot4" Width="9" Height="9" Fill="{DynamicResource BorderBrush}" Margin="0,0,6,0"/>
+            <Ellipse x:Name="Dot5" Width="9" Height="9" Fill="{DynamicResource BorderBrush}" Margin="0,0,6,0"/>
+            <Ellipse x:Name="Dot6" Width="9" Height="9" Fill="{DynamicResource BorderBrush}"/>
+            <TextBlock x:Name="StepLabel" Foreground="{DynamicResource MutedBrush}" FontSize="11"
+                       VerticalAlignment="Center" Margin="10,0,0,0"/>
+        </StackPanel>
+
+        <!-- Основное содержимое шагов -->
+        <Grid Grid.Row="3">
+            <!-- Шаг 0: приветствие -->
+            <StackPanel x:Name="Step0" Margin="0,0,0,8">
+                <TextBlock TextWrapping="Wrap" FontSize="13" Margin="0,0,0,10"
+                           Text="{loc:Loc Fwz.HelloP1}"/>
+                <TextBlock TextWrapping="Wrap" FontSize="13" Margin="0,0,0,10"
+                           Text="{loc:Loc Fwz.HelloP2}"/>
+                <TextBlock TextWrapping="Wrap" FontSize="13" Margin="0,0,0,14"
+                           Text="{loc:Loc Fwz.HelloP3}"/>
+                <CheckBox x:Name="AutoStartBox" Content="{loc:Loc Fwz.HelloAutoStart}"
+                          FontSize="13" VerticalAlignment="Center"/>
+                <!-- 3.0.1.3: самозащита возвращена в мастер (галочка по умолчанию включена). -->
+                <CheckBox x:Name="SelfDefBox" Content="{loc:Loc Fwz.HelloSelfDef}"
+                          FontSize="13" Margin="0,10,0,0" VerticalAlignment="Center"
+                          IsChecked="True"/>
+                <!-- 3.0.1.5: отключение Защитника Windows (галочка по умолчанию включена —
+                     мастер для новичков; намерение применяет служба через defender_ctl.ps1). -->
+                <CheckBox x:Name="DisableDefenderBox" Content="{loc:Loc Fwz.HelloDisableDefender}"
+                          FontSize="13" Margin="0,10,0,0" VerticalAlignment="Center"
+                          IsChecked="True"/>
+            </StackPanel>
+
+            <!-- Шаг 1: антивирус -->
+            <StackPanel x:Name="Step1" Visibility="Collapsed" Margin="0,0,0,8">
+                <TextBlock TextWrapping="Wrap" FontSize="13" Margin="0,0,0,10"
+                           Text="{loc:Loc Fwz.AvIntro}"/>
+                <CheckBox x:Name="MonitorBox" Content="{loc:Loc Fwz.AvResident}"
+                          FontSize="13" Margin="0,0,0,8" VerticalAlignment="Center"/>
+                <!-- 3.0.1.5: пункт «Проверить с помощью Cat Guardian» в контекстном меню
+                     Проводника включён по умолчанию (мастер для новичков). -->
+                <CheckBox x:Name="ContextMenuBox" Content="{loc:Loc Fwz.AvContextMenu}"
+                          FontSize="13" Margin="0,0,0,8" VerticalAlignment="Center"
+                          IsChecked="True"/>
+            </StackPanel>
+
+            <!-- Шаг 2: проактивная защита — ВСЕ модули, по группам -->
+            <ScrollViewer x:Name="Step2" Visibility="Collapsed" VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled" Margin="0,0,0,8">
+                <StackPanel>
+                    <TextBlock TextWrapping="Wrap" FontSize="13" Margin="0,0,0,10"
+                               Text="{loc:Loc Fwz.PpIntro}"/>
+
+                    <!-- Группа 1 -->
+                    <TextBlock Text="{loc:Loc Fwz.PpGroup1}" FontWeight="Bold"
+                               Foreground="{DynamicResource AccentBrush}" Margin="0,4,0,6"/>
+                    <CheckBox x:Name="ModProcBox" Content="{loc:Loc Fwz.PpProc}" FontSize="13" Margin="0,0,0,5"/>
+                    <CheckBox x:Name="ModEtwBox" Content="{loc:Loc Fwz.PpEtw}" FontSize="13" Margin="0,0,0,5"/>
+                    <CheckBox x:Name="ModDllBox" Content="{loc:Loc Fwz.PpDll}" FontSize="13" Margin="0,0,0,5"/>
+                    <CheckBox x:Name="ModParentChildBox" Content="{loc:Loc Fwz.PpParentChild}" FontSize="13" Margin="0,0,0,5"/>
+                    <CheckBox x:Name="ModLolBinBox" Content="{loc:Loc Fwz.PpLolBin}" FontSize="13" Margin="0,0,0,5"/>
+                    <CheckBox x:Name="ModAmsiBox" Content="{loc:Loc Fwz.PpAmsi}" FontSize="13" Margin="0,0,0,5"/>
+                    <CheckBox x:Name="ModAnomalyBox" Content="{loc:Loc Fwz.PpAnomaly}" FontSize="13" Margin="0,0,0,5"/>
+
+                    <!-- Группа 2 -->
+                    <TextBlock Text="{loc:Loc Fwz.PpGroup2}" FontWeight="Bold"
+                               Foreground="{DynamicResource AccentBrush}" Margin="0,12,0,6"/>
+                    <CheckBox x:Name="ModRansomBox" Content="{loc:Loc Fwz.PpRansom}" FontSize="13" Margin="0,0,0,5"/>
+                    <CheckBox x:Name="ModPreScanBox" Content="{loc:Loc Fwz.PpPreScan}" FontSize="13" Margin="0,0,0,5"/>
+                    <CheckBox x:Name="ModEntropyBox" Content="{loc:Loc Fwz.PpEntropy}" FontSize="13" Margin="0,0,0,5"/>
+                    <CheckBox x:Name="ModSandboxBox" Content="{loc:Loc Fwz.PpSandbox}" FontSize="13" Margin="0,0,0,5"/>
+
+                    <!-- Группа 3 -->
+                    <TextBlock Text="{loc:Loc Fwz.PpGroup3}" FontWeight="Bold"
+                               Foreground="{DynamicResource AccentBrush}" Margin="0,12,0,6"/>
+                    <CheckBox x:Name="ModFirewallBox" Content="{loc:Loc Fwz.PpFirewall}" FontSize="13" Margin="0,0,0,5"/>
+                    <CheckBox x:Name="ModPortListenerBox" Content="{loc:Loc Fwz.PpPortListener}" FontSize="13" Margin="0,0,0,5"/>
+                    <CheckBox x:Name="ModMinerBox" Content="{loc:Loc Fwz.PpMiner}" FontSize="13" Margin="0,0,0,5"/>
+
+                    <!-- Группа 4 -->
+                    <TextBlock Text="{loc:Loc Fwz.PpGroup4}" FontWeight="Bold"
+                               Foreground="{DynamicResource AccentBrush}" Margin="0,12,0,6"/>
+                    <CheckBox x:Name="ModAutoStartBox" Content="{loc:Loc Fwz.PpAutoStart}" FontSize="13" Margin="0,0,0,5"/>
+                    <CheckBox x:Name="ModShortcutBox" Content="{loc:Loc Fwz.PpShortcut}" FontSize="13" Margin="0,0,0,5"/>
+                    <CheckBox x:Name="ModWmiBox" Content="{loc:Loc Fwz.PpWmi}" FontSize="13" Margin="0,0,0,5"/>
+                    <CheckBox x:Name="ModWinlockBox" Content="{loc:Loc Fwz.PpWinlock}" FontSize="13" Margin="0,0,0,5"/>
+
+                    <!-- Группа 5 -->
+                    <TextBlock Text="{loc:Loc Fwz.PpGroup5}" FontWeight="Bold"
+                               Foreground="{DynamicResource AccentBrush}" Margin="0,12,0,6"/>
+                    <CheckBox x:Name="ModAntiStealerBox" Content="{loc:Loc Fwz.PpAntiStealer}" FontSize="13" Margin="0,0,0,5"/>
+                    <CheckBox x:Name="ModSpywareBox" Content="{loc:Loc Fwz.PpSpyware}" FontSize="13" Margin="0,0,0,5"/>
+                    <CheckBox x:Name="ModClipBox" Content="{loc:Loc Fwz.PpClipboard}" FontSize="13" Margin="0,0,0,5"/>
+                    <CheckBox x:Name="ModPrivacyBox" Content="{loc:Loc Fwz.PpPrivacy}" FontSize="13" Margin="0,0,0,5"/>
+                    <CheckBox x:Name="ModExtensionsBox" Content="{loc:Loc Fwz.PpExtensions}" FontSize="13" Margin="0,0,0,5"/>
+                </StackPanel>
+            </ScrollViewer>
+
+            <!-- Шаг 3: файлы-приманки (3.0.0.98) -->
+            <StackPanel x:Name="Step3" Visibility="Collapsed" Margin="0,0,0,8">
+                <TextBlock TextWrapping="Wrap" FontSize="13" Margin="0,0,0,10"
+                           Text="{loc:Loc Fwz.HoneyIntro}"/>
+                <CheckBox x:Name="HoneyBox" Content="{loc:Loc Fwz.HoneyEnable}" FontSize="13"
+                          Margin="0,0,0,12" VerticalAlignment="Center" IsChecked="True"/>
+                <TextBlock Text="{loc:Loc Fwz.HoneyZones}" FontWeight="Bold"
+                           Foreground="{DynamicResource AccentBrush}" Margin="0,4,0,6"/>
+                <Grid Margin="0,0,0,10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Grid.Column="0">
+                        <CheckBox x:Name="HoneyDesktopBox" Content="{loc:Loc Fwz.HoneyDesktop}" FontSize="13" Margin="0,0,0,5"/>
+                        <CheckBox x:Name="HoneyDocumentsBox" Content="{loc:Loc Fwz.HoneyDocuments}" FontSize="13" Margin="0,0,0,5"/>
+                        <CheckBox x:Name="HoneyDevBox" Content="{loc:Loc Fwz.HoneyDev}" FontSize="13" Margin="0,0,0,5"/>
+                        <CheckBox x:Name="HoneyDownloadsBox" Content="{loc:Loc Fwz.HoneyDownloads}" FontSize="13" Margin="0,0,0,5"/>
+                    </StackPanel>
+                    <StackPanel Grid.Column="1">
+                        <CheckBox x:Name="HoneyPicturesBox" Content="{loc:Loc Fwz.HoneyPictures}" FontSize="13" Margin="0,0,0,5"/>
+                        <CheckBox x:Name="HoneyBrowserBox" Content="{loc:Loc Fwz.HoneyBrowser}" FontSize="13" Margin="0,0,0,5"/>
+                        <CheckBox x:Name="HoneyMessengerBox" Content="{loc:Loc Fwz.HoneyMessenger}" FontSize="13" Margin="0,0,0,5"/>
+                    </StackPanel>
+                </Grid>
+                <TextBlock x:Name="HoneyStatus" TextWrapping="Wrap" FontSize="12"
+                           Foreground="{DynamicResource AmberBrush}"
+                           Text="{loc:Loc Fwz.HoneyStatus}"/>
+            </StackPanel>
+
+            <!-- Шаг 4: сетевые угрозы (3.0.1.1). Загрузка фидов угроз и применение
+                 правил ThreatIntel:*. -->
+            <StackPanel x:Name="Step4" Visibility="Collapsed" Margin="0,0,0,8">
+                <TextBlock TextWrapping="Wrap" FontSize="13" Margin="0,0,0,10"
+                           Text="{loc:Loc Fwz.FwIntro}"/>
+                <CheckBox x:Name="FirewallThreatsBox" Content="{loc:Loc Fwz.FwEnable}"
+                          FontSize="13" Margin="0,0,0,12" VerticalAlignment="Center"
+                          IsChecked="True"/>
+                <StackPanel Orientation="Horizontal" Margin="0,4,0,10">
+                    <Button x:Name="FirewallThreatsBtn" Content="{loc:Loc Fwz.FwApplyNow}"
+                            MinWidth="250" MinHeight="34" Padding="14,4" FontSize="13"
+                            Click="OnFirewallThreatsApplyClick"/>
+                </StackPanel>
+                <ProgressBar x:Name="FirewallThreatsProgress" Height="8" Margin="0,0,0,6"
+                             IsIndeterminate="False" Minimum="0" Maximum="100" Value="0"/>
+                <TextBlock x:Name="FirewallThreatsStatus" TextWrapping="Wrap" FontSize="12"
+                           Foreground="{DynamicResource AmberBrush}"
+                           Text="{loc:Loc Fwz.FwStatusReady}"/>
+            </StackPanel>
+
+            <!-- Шаг 5: инспектор файлов и реестра (3.0.0.98) -->
+            <Grid x:Name="Step5" Visibility="Collapsed" Margin="0,0,0,8">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                <TextBlock TextWrapping="Wrap" FontSize="13" Margin="0,0,0,8"
+                           Text="{loc:Loc Fwz.InsIntro}"/>
+                <Grid Grid.Row="1">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="16"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <!-- Постоянно наблюдаемые каталоги -->
+                    <Grid Grid.Column="0">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <TextBlock Text="{loc:Loc Fwz.InsRootsTitle}" FontWeight="Bold"
+                                   Foreground="{DynamicResource AccentBrush}" Margin="0,4,0,4" FontSize="13"/>
+                        <ListBox x:Name="WizardRootsList" Grid.Row="1" MinHeight="80" MaxHeight="150" FontSize="12"/>
+                        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,6,0,0" HorizontalAlignment="Left">
+                            <Button Content="{loc:Loc Fwz.InsAdd}" MinWidth="92" MinHeight="28" Padding="10,2" FontSize="12"
+                                    Click="OnWizardAddRootClick"/>
+                            <Button Content="{loc:Loc Fwz.InsRemove}" MinWidth="82" MinHeight="28" Padding="10,2" Margin="8,0,0,0"
+                                    FontSize="12" Click="OnWizardRemoveRootClick"/>
+                            <Button Content="{loc:Loc Fwz.InsRecommended}" MinWidth="118" MinHeight="28" Padding="10,2" Margin="8,0,0,0"
+                                    FontSize="12" Click="OnWizardRecommendedClick"/>
+                        </StackPanel>
+                    </Grid>
+                    <!-- Постоянно наблюдаемые ветки реестра -->
+                    <Grid Grid.Column="2">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <TextBlock Text="{loc:Loc Fwz.InsRegTitle}" FontWeight="Bold"
+                                   Foreground="{DynamicResource AccentBrush}" Margin="0,4,0,4" FontSize="13"/>
+                        <ListBox x:Name="WizardRegList" Grid.Row="1" MinHeight="80" MaxHeight="150" FontSize="12"/>
+                        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,6,0,0" HorizontalAlignment="Left">
+                            <Button Content="{loc:Loc Fwz.InsAdd}" MinWidth="92" MinHeight="28" Padding="10,2" FontSize="12"
+                                    Click="OnWizardAddRegClick"/>
+                            <Button Content="{loc:Loc Fwz.InsRemove}" MinWidth="82" MinHeight="28" Padding="10,2" Margin="8,0,0,0"
+                                    FontSize="12" Click="OnWizardRemoveRegClick"/>
+                        </StackPanel>
+                    </Grid>
+                </Grid>
+                <Grid Grid.Row="2" Margin="0,12,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="{loc:Loc Fwz.InsExtensions}" VerticalAlignment="Center" FontSize="12"
+                               Margin="0,0,8,0"/>
+                    <TextBox x:Name="WizardExtBox" Grid.Column="1" FontSize="12" Padding="4,2" Text="exe dll sys cpl"/>
+                </Grid>
+                <CheckBox x:Name="WizardNotifyBox" Grid.Row="3"
+                          Content="{loc:Loc Fwz.InsNotify}"
+                          FontSize="13" Margin="0,12,0,0" VerticalAlignment="Center"/>
+                <TextBlock x:Name="WizardDepHint" Grid.Row="4" TextWrapping="Wrap" FontSize="11"
+                           Foreground="{DynamicResource MutedBrush}" Margin="0,6,0,0"/>
+            </Grid>
+
+            <!-- Шаг 6: эталон + финальный -->
+            <StackPanel x:Name="Step6" Visibility="Collapsed" Margin="0,0,0,8">
+                <TextBlock TextWrapping="Wrap" FontSize="13" Margin="0,0,0,10"
+                           Text="{loc:Loc Fwz.BaselineIntro}"/>
+                <StackPanel Orientation="Horizontal" Margin="0,4,0,10">
+                    <Button x:Name="CaptureBaselineBtn" Content="{loc:Loc Fwz.BaselineNow}"
+                            MinWidth="260" MinHeight="34" Padding="14,4" FontSize="13"
+                            Click="OnCaptureBaselineClick"/>
+                    <Button x:Name="SkipBaselineBtn" Content="{loc:Loc Fwz.BaselineLater}" MinWidth="110" MinHeight="34"
+                            Padding="12,4" Margin="10,0,0,0" FontSize="13"
+                            Click="OnSkipBaselineClick"/>
+                </StackPanel>
+                <ProgressBar x:Name="BaselineProgress" Height="8" Margin="0,0,0,6" IsIndeterminate="False"
+                             Minimum="0" Maximum="100" Value="0"/>
+                <TextBlock x:Name="BaselineStatus" TextWrapping="Wrap" FontSize="12"
+                           Foreground="{DynamicResource AmberBrush}" Text="{loc:Loc Fwz.BaselineNotTaken}"/>
+            </StackPanel>
+        </Grid>
+
+        <!-- Нижняя панель: навигация -->
+        <Grid Grid.Row="4">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <Button x:Name="BackBtn" Grid.Column="0" Content="{loc:Loc Fwz.Back}" MinWidth="100" MinHeight="34"
+                    Padding="12,4" FontSize="13" IsEnabled="False" Click="OnBackClick"/>
+            <!-- 3.0.1.4: версия берётся из метаданных сборки (Directory.Build.props) в code-behind —
+                 единый источник, номер не дублируется в локализации. -->
+            <TextBlock x:Name="VersionText" Grid.Column="1" VerticalAlignment="Center"
+                       HorizontalAlignment="Right" Margin="0,0,12,0"
+                       Foreground="{DynamicResource MutedBrush}" FontSize="11"/>
+            <Button x:Name="NextBtn" Grid.Column="2" Content="{loc:Loc Fwz.Next}" MinWidth="120" MinHeight="34"
+                    Padding="16,4" FontSize="13" IsDefault="True" Click="OnNextClick"/>
+        </Grid>
+    </Grid>
+</Window>

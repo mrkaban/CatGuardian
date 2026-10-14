@@ -1,0 +1,171 @@
+﻿<Window x:Class="CatGuardian.UI.Views.VirusAlertWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:loc="clr-namespace:CatGuardian.UI.Localization"
+        Title="{loc:Loc Al1988}" Width="760" Height="600"
+        MinWidth="660" MinHeight="520"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="True"
+        ResizeMode="CanResize" FontFamily="Segoe UI" FontSize="13">
+    <!-- 3.0.0.36: шаблон алерт-окна семейства (см. EtwAlertWindow-эталон):
+         баннер вердикта, секции в карточках, единый статус-блок,
+         решающие кнопки одной строкой, утилиты в шапке. -->
+    <Window.Resources>
+        <Style x:Key="FieldLabel" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{DynamicResource MutedBrush}"/>
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Margin" Value="0,10,0,3"/>
+        </Style>
+        <Style x:Key="InlineValue" TargetType="TextBox">
+            <Setter Property="IsReadOnly" Value="True"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+            <Setter Property="AcceptsReturn" Value="True"/>
+            <Setter Property="VerticalScrollBarVisibility" Value="Auto"/>
+            <Setter Property="MaxHeight" Value="80"/>
+            <Setter Property="MinHeight" Value="20"/>
+            <Setter Property="FontFamily" Value="Consolas"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Padding" Value="2,4"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
+            <Setter Property="ToolTip" Value="Значение можно выделить и скопировать (Ctrl+C). Полный путь — во всплывающей подсказке."/>
+        </Style>
+        <Style x:Key="HeaderUtilityButton" TargetType="Button">
+            <Setter Property="MinHeight" Value="30"/>
+            <Setter Property="Padding" Value="12,5"/>
+            <Setter Property="Margin" Value="0,0,8,0"/>
+            <Setter Property="FontSize" Value="12"/>
+        </Style>
+        <Style x:Key="DecisionButton" TargetType="Button">
+            <Setter Property="MinHeight" Value="40"/>
+            <Setter Property="Padding" Value="16,9"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="18">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Шапка: заголовок + утилиты справа сверху (3.0.0.36). -->
+        <Grid Grid.Row="0" Margin="0,0,0,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+
+            <StackPanel Grid.Column="0">
+                <TextBlock FontSize="18" FontWeight="Bold" TextWrapping="Wrap"
+                           Foreground="{DynamicResource TextBrush}">
+                    🛡️ Cat Guardian — Обнаружена угроза
+                </TextBlock>
+                <TextBlock x:Name="ThreatKindText" Foreground="{DynamicResource RedBrush}"
+                           FontWeight="SemiBold" Margin="0,4,0,0" TextWrapping="Wrap"/>
+            </StackPanel>
+
+            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top"
+                        Margin="16,0,0,0">
+                <Button x:Name="BtnOpenFolder" Style="{StaticResource HeaderUtilityButton}"
+                        Content="{loc:Loc Al1989}" Click="OnOpenFolder"
+                        ToolTip="{loc:Loc Al1990}"/>
+                <Button Style="{StaticResource HeaderUtilityButton}" Content="{loc:Loc Al1991}"
+                        Margin="0,0,0,0" Click="OnCopyAll"
+                        ToolTip="{loc:Loc Al1992}"/>
+            </StackPanel>
+        </Grid>
+
+        <!-- Баннер вердикта (3.0.0.36). -->
+        <Border Grid.Row="1" CornerRadius="4" Padding="12,8"
+                Background="#1AF44336" BorderThickness="1"
+                BorderBrush="{DynamicResource RedBrush}">
+            <StackPanel>
+                <TextBlock FontSize="14" FontWeight="Bold" TextWrapping="Wrap"
+                           Foreground="{DynamicResource RedBrush}">
+                    ☠️ ОПАСНО — обнаружена угроза
+                </TextBlock>
+                <TextBlock FontSize="12" TextWrapping="Wrap" Margin="0,2,0,0"
+                           Foreground="{DynamicResource TextBrush}">
+                    Файл распознан антивирусными сигнатурами как вредоносный. Служба уже выполнила действие по настройкам (карантин/уведомление) — ниже показан фактический результат обработки.
+                </TextBlock>
+            </StackPanel>
+        </Border>
+
+        <!-- Детали -->
+        <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto" Margin="0,4,0,8">
+            <StackPanel>
+                <!-- ОБЪЕКТ СКАНИРОВАНИЯ -->
+                <TextBlock Style="{StaticResource FieldLabel}" Text="{loc:Loc Al1993}"/>
+                <Border Background="#14FFFFFF" CornerRadius="4" Padding="10,6" BorderThickness="1"
+                        BorderBrush="{DynamicResource BorderBrush}">
+                    <StackPanel>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="{loc:Loc Al1994}" Foreground="{DynamicResource MutedBrush}" FontSize="12"
+                                       VerticalAlignment="Center"/>
+                            <TextBox x:Name="FilePathText" Style="{StaticResource InlineValue}"
+                                     Margin="10,0,0,0" VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+                            <TextBlock Text="{loc:Loc Al1995}" Foreground="{DynamicResource MutedBrush}" FontSize="12"
+                                       VerticalAlignment="Center"/>
+                            <TextBox x:Name="FileNameText" Style="{StaticResource InlineValue}"
+                                     Margin="10,0,0,0" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- ДЕТАЛИЗАЦИЯ УГРОЗЫ -->
+                <TextBlock Style="{StaticResource FieldLabel}" Text="{loc:Loc Al1996}"/>
+                <Border Background="#14FFFFFF" CornerRadius="4" Padding="10,6" BorderThickness="1"
+                        BorderBrush="{DynamicResource BorderBrush}">
+                    <StackPanel>
+                        <TextBlock Text="{loc:Loc Al1997}" Foreground="{DynamicResource MutedBrush}" FontSize="12"/>
+                        <TextBlock x:Name="ThreatTypeText" FontWeight="Bold" FontSize="13"
+                                   Foreground="{DynamicResource RedBrush}" TextWrapping="Wrap"
+                                   Margin="0,2,0,0"/>
+                        <!-- 3.0.0.31: имя сигнатуры/эвристики выделяется жирным внутри описания
+                             (TextBlock + Inlines), текст по-прежнему доступен для копирования. -->
+                        <TextBlock x:Name="DetailsText" TextWrapping="Wrap" FontSize="13" LineHeight="20"
+                                   Foreground="{DynamicResource TextBrush}" Margin="0,6,0,0"/>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- Единый статус-блок + решающие кнопки одной строкой (3.0.0.36). -->
+        <Grid Grid.Row="3">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <Border Grid.Row="0" Background="#14FFFFFF" CornerRadius="4"
+                    Padding="10,6" BorderThickness="1" BorderBrush="{DynamicResource BorderBrush}">
+                <StackPanel>
+                    <TextBlock x:Name="StatusText" FontWeight="SemiBold" FontSize="13" TextWrapping="Wrap"
+                               Foreground="{DynamicResource AmberBrush}"/>
+                    <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                        <TextBlock Text="{loc:Loc Al1998}" Foreground="{DynamicResource MutedBrush}" FontSize="12"
+                                   VerticalAlignment="Center"/>
+                        <TextBox x:Name="TimeText" Style="{StaticResource InlineValue}"
+                                 Margin="10,0,0,0" VerticalAlignment="Center"/>
+                    </StackPanel>
+                    <TextBlock x:Name="ActionStatus" Foreground="{DynamicResource MutedBrush}" FontSize="12"
+                               TextWrapping="Wrap" Margin="0,4,0,0" Visibility="Collapsed"/>
+                </StackPanel>
+            </Border>
+
+            <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
+                <Button x:Name="BtnQuarantine" Style="{StaticResource DecisionButton}"
+                        Content="{loc:Loc Al1999}" Margin="0,0,8,0" Click="OnOpenQuarantine"
+                        ToolTip="{loc:Loc Al2000}"/>
+                <Button Content="{loc:Loc Al2001}" IsCancel="True" Style="{StaticResource DecisionButton}"
+                        Margin="0,0,0,0" Click="OnClose"/>
+            </StackPanel>
+        </Grid>
+    </Grid>
+</Window>

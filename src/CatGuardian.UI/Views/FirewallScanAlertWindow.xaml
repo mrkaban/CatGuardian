@@ -1,0 +1,168 @@
+﻿<Window x:Class="CatGuardian.UI.Views.FirewallScanAlertWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:loc="clr-namespace:CatGuardian.UI.Localization"
+        Title="{loc:Loc Al1347}" Width="760" Height="560"
+        MinWidth="660" MinHeight="500"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="True"
+        ResizeMode="CanResize" FontFamily="Segoe UI" FontSize="13">
+    <!-- 3.0.0.36: шаблон алерт-окна семейства (см. EtwAlertWindow-эталон):
+         баннер вердикта, секции «КТО → ЧТО», единый статус-блок,
+         решающие кнопки одной строкой, утилиты в шапке. -->
+    <Window.Resources>
+        <Style x:Key="FieldLabel" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{DynamicResource MutedBrush}"/>
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Margin" Value="0,10,0,3"/>
+        </Style>
+        <Style x:Key="InlineValue" TargetType="TextBox">
+            <Setter Property="IsReadOnly" Value="True"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+            <Setter Property="AcceptsReturn" Value="True"/>
+            <Setter Property="VerticalScrollBarVisibility" Value="Auto"/>
+            <Setter Property="MaxHeight" Value="80"/>
+            <Setter Property="MinHeight" Value="20"/>
+            <Setter Property="FontFamily" Value="Consolas"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Padding" Value="2,4"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
+            <Setter Property="ToolTip" Value="Значение можно выделить и скопировать (Ctrl+C)."/>
+        </Style>
+        <Style x:Key="HeaderUtilityButton" TargetType="Button">
+            <Setter Property="MinHeight" Value="30"/>
+            <Setter Property="Padding" Value="12,5"/>
+            <Setter Property="Margin" Value="0,0,8,0"/>
+            <Setter Property="FontSize" Value="12"/>
+        </Style>
+        <Style x:Key="DecisionButton" TargetType="Button">
+            <Setter Property="MinHeight" Value="40"/>
+            <Setter Property="Padding" Value="16,9"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="18">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Шапка: заголовок + утилиты справа сверху (3.0.0.36). -->
+        <Grid Grid.Row="0" Margin="0,0,0,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+
+            <StackPanel Grid.Column="0">
+                <TextBlock FontSize="18" FontWeight="Bold" TextWrapping="Wrap"
+                           Foreground="{DynamicResource TextBrush}">
+                    🛡️ Cat Guardian — сканер портов / брутфорс
+                </TextBlock>
+                <TextBlock x:Name="ThreatKindText" Foreground="{DynamicResource RedBrush}"
+                           FontWeight="SemiBold" Margin="0,4,0,0" TextWrapping="Wrap"/>
+            </StackPanel>
+
+            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top"
+                        Margin="16,0,0,0">
+                <Button x:Name="BtnOpenFolder" Style="{StaticResource HeaderUtilityButton}"
+                        Content="{loc:Loc Al1348}" Click="OnOpenFolder"
+                        ToolTip="{loc:Loc Al1349}"/>
+                <Button Style="{StaticResource HeaderUtilityButton}" Content="{loc:Loc Al1350}"
+                        Margin="0,0,0,0" Click="OnCopyAll"
+                        ToolTip="{loc:Loc Al1351}"/>
+            </StackPanel>
+        </Grid>
+
+        <!-- Баннер вердикта (3.0.0.36). -->
+        <Border x:Name="VerdictBorder" Grid.Row="1" CornerRadius="4" Padding="12,8"
+                Background="#1AF44336" BorderThickness="1"
+                BorderBrush="{DynamicResource RedBrush}">
+            <StackPanel>
+                <TextBlock x:Name="VerdictTitle" FontSize="14" FontWeight="Bold"
+                           TextWrapping="Wrap" Foreground="{DynamicResource RedBrush}"/>
+                <TextBlock x:Name="VerdictMeaning" FontSize="12" TextWrapping="Wrap"
+                           Margin="0,2,0,0" Foreground="{DynamicResource TextBrush}"/>
+            </StackPanel>
+        </Border>
+
+        <!-- Детали -->
+        <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto" Margin="0,4,0,8">
+            <StackPanel>
+                <!-- КТО ПЫТАЕТСЯ -->
+                <TextBlock Style="{StaticResource FieldLabel}" Text="{loc:Loc Al1352}"/>
+                <Border Background="#14FFFFFF" CornerRadius="4" Padding="10,6" BorderThickness="1"
+                        BorderBrush="{DynamicResource BorderBrush}">
+                    <StackPanel>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="{loc:Loc Al1353}" Foreground="{DynamicResource MutedBrush}" FontSize="12"
+                                       VerticalAlignment="Center"/>
+                            <TextBox x:Name="ProcessNameText" Style="{StaticResource InlineValue}"
+                                     Margin="10,0,0,0" VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+                            <TextBlock Text="PID:" Foreground="{DynamicResource MutedBrush}" FontSize="12"
+                                       VerticalAlignment="Center"/>
+                            <TextBox x:Name="PidText" Style="{StaticResource InlineValue}"
+                                     Margin="10,0,0,0" VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <StackPanel x:Name="PathRow" Orientation="Horizontal" Margin="0,4,0,0">
+                            <TextBlock Text="{loc:Loc Al1354}" Foreground="{DynamicResource MutedBrush}" FontSize="12"
+                                       VerticalAlignment="Center"/>
+                            <TextBox x:Name="ProcessPathText" Style="{StaticResource InlineValue}"
+                                     Margin="10,0,0,0" VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+                            <TextBlock Text="{loc:Loc Al1355}" Foreground="{DynamicResource MutedBrush}" FontSize="12"
+                                       VerticalAlignment="Center"/>
+                            <TextBox x:Name="SignatureText" Style="{StaticResource InlineValue}"
+                                     Margin="10,0,0,0" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- ЧТО ПЫТАЕТСЯ СДЕЛАТЬ -->
+                <TextBlock Style="{StaticResource FieldLabel}" Text="{loc:Loc Al1356}"/>
+                <Border Background="#14FFFFFF" CornerRadius="4" Padding="10,6" BorderThickness="1"
+                        BorderBrush="{DynamicResource BorderBrush}">
+                    <TextBox x:Name="DetailsText" Style="{StaticResource InlineValue}" MinHeight="60"/>
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- Единый статус-блок + решающие кнопки одной строкой (3.0.0.36). -->
+        <Grid Grid.Row="3">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <Border x:Name="StatusBlock" Grid.Row="0" Background="#14FFFFFF" CornerRadius="4"
+                    Padding="10,6" BorderThickness="1" BorderBrush="{DynamicResource BorderBrush}">
+                <StackPanel>
+                    <TextBlock x:Name="StatusText" FontWeight="SemiBold" FontSize="13" TextWrapping="Wrap"
+                               Foreground="{DynamicResource AmberBrush}"/>
+                    <TextBlock x:Name="ActionStatus" Foreground="{DynamicResource MutedBrush}" FontSize="12"
+                               TextWrapping="Wrap" Margin="0,4,0,0" Visibility="Collapsed"/>
+                </StackPanel>
+            </Border>
+
+            <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
+                <Button Content="{loc:Loc Al1357}" Style="{StaticResource DecisionButton}"
+                        Margin="0,0,8,0" Click="OnTrust"
+                        ToolTip="{loc:Loc Al1358}"/>
+                <Button x:Name="BtnKill" Style="{StaticResource DecisionButton}"
+                        Content="{loc:Loc Al1359}" Margin="0,0,8,0" FontWeight="Bold"
+                        Background="#D32F2F" Foreground="White" BorderThickness="0" Click="OnKill"
+                        ToolTip="{loc:Loc Al1360}"/>
+                <Button Content="{loc:Loc Al1361}" IsCancel="True" Style="{StaticResource DecisionButton}"
+                        Margin="0,0,0,0" Click="OnClose"/>
+            </StackPanel>
+        </Grid>
+    </Grid>
+</Window>

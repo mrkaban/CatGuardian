@@ -1,0 +1,108 @@
+<Window x:Class="CatGuardian.UI.Views.ResultDetailsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:loc="clr-namespace:CatGuardian.UI.Localization"
+        Title="{loc:Loc Rdr.Title}"
+        Width="720" Height="540"
+        MinWidth="600" MinHeight="440"
+        WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False"
+        ResizeMode="CanResize"
+        Background="{DynamicResource BgBrush}">
+    <!-- 3.0.0.21: подробности строки результата сканирования в Инспекторе файлов.
+         Открывается по двойному клику в таблице результатов; секции адаптируются
+         под тип строки: файл / реестр / IOC. -->
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Шапка: вердикт -->
+        <StackPanel Grid.Row="0" Margin="0,0,0,12">
+            <TextBlock x:Name="KindText" FontSize="18" FontWeight="Bold"
+                       FontFamily="Segoe UI Emoji" TextWrapping="Wrap"
+                       Foreground="{DynamicResource TextBrush}"/>
+            <TextBlock x:Name="KindCaption" Margin="0,4,0,0" FontSize="12"
+                       Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap"/>
+        </StackPanel>
+
+        <!-- Контент -->
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled">
+            <StackPanel>
+                <!-- Объект -->
+                <Border Style="{StaticResource Card}" Padding="12">
+                    <StackPanel>
+                        <TextBlock Style="{StaticResource SectionTitleUpper}" Text="{loc:Loc Rdr.Object}"/>
+                        <TextBlock x:Name="ObjectText" Margin="0,6,0,0" TextWrapping="Wrap"
+                                   FontFamily="Consolas" FontSize="13"
+                                   Foreground="{DynamicResource TextBrush}"/>
+                        <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                            <Button x:Name="CopyPathBtn" Content="{loc:Loc Ins.BtnCopyPath}" Padding="12,5"
+                                    Click="OnCopyPath"/>
+                            <Button x:Name="OpenFolderBtn" Content="{loc:Loc Ins.BtnOpenFolder}" Padding="12,5"
+                                    Margin="8,0,0,0" Click="OnOpenFolder" Visibility="Collapsed"/>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- Файл на диске -->
+                <Border x:Name="FileSection" Style="{StaticResource Card}" Padding="12"
+                        Margin="0,10,0,0" Visibility="Collapsed">
+                    <StackPanel>
+                        <TextBlock Style="{StaticResource SectionTitleUpper}" Text="{loc:Loc Rdr.FileOnDisk}"/>
+                        <TextBlock x:Name="FileExistsRow" Margin="0,6,0,0" TextWrapping="Wrap"/>
+                        <TextBlock x:Name="FileSizeRow" Margin="0,4,0,0" TextWrapping="Wrap"/>
+                        <TextBlock x:Name="FileModifiedRow" Margin="0,4,0,0" TextWrapping="Wrap"/>
+                        <TextBlock x:Name="HashCurrentRow" Margin="0,8,0,0" TextWrapping="Wrap"
+                                   FontFamily="Consolas" FontSize="12"/>
+                        <TextBlock x:Name="HashOldRow" Margin="0,4,0,0" TextWrapping="Wrap"
+                                   FontFamily="Consolas" FontSize="12" Visibility="Collapsed"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- Индикатор компрометации (IOC) -->
+                <Border x:Name="IocSection" Style="{StaticResource Card}" Padding="12"
+                        Margin="0,10,0,0" Visibility="Collapsed">
+                    <StackPanel>
+                        <TextBlock Style="{StaticResource SectionTitleUpper}" Text="{loc:Loc Rdr.Ioc}"/>
+                        <TextBlock x:Name="IocMatchRow" Margin="0,6,0,0" TextWrapping="Wrap"
+                                   FontFamily="Consolas" FontSize="12"/>
+                        <TextBlock x:Name="IocBaseRow" Margin="0,4,0,0" TextWrapping="Wrap"/>
+                        <TextBlock x:Name="IocDescRow" Margin="0,4,0,0" TextWrapping="Wrap"/>
+                        <TextBlock Margin="0,8,0,0" TextWrapping="Wrap" FontSize="12"
+                                   Foreground="{DynamicResource AmberBrush}"
+                                   Text="{loc:Loc Ins.IocNoBaselineNote}"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- Значение реестра -->
+                <Border x:Name="RegistrySection" Style="{StaticResource Card}" Padding="12"
+                        Margin="0,10,0,0" Visibility="Collapsed">
+                    <StackPanel>
+                        <TextBlock Style="{StaticResource SectionTitleUpper}" Text="{loc:Loc Rdr.RegValue}"/>
+                        <TextBlock x:Name="RegValueNameRow" Margin="0,6,0,0" TextWrapping="Wrap"/>
+                        <TextBlock x:Name="RegValueTypeRow" Margin="0,4,0,0" TextWrapping="Wrap"
+                                   Visibility="Collapsed"/>
+                        <TextBlock x:Name="RegValueDataRow" Margin="0,4,0,0" TextWrapping="Wrap"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- Детали проверки -->
+                <Border Style="{StaticResource Card}" Padding="12" Margin="0,10,0,0">
+                    <StackPanel>
+                        <TextBlock Style="{StaticResource SectionTitleUpper}" Text="{loc:Loc Rdr.CheckDetails}"/>
+                        <TextBlock x:Name="DetailText" Margin="0,6,0,0" TextWrapping="Wrap"
+                                   FontFamily="Consolas" FontSize="13"
+                                   Foreground="{DynamicResource TextBrush}"/>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+
+        <Button Grid.Row="2" Content="{loc:Loc Mods.BtnClose}" Padding="16,6" IsDefault="True"
+                HorizontalAlignment="Right" Margin="0,12,0,0" Click="OnClose"/>
+    </Grid>
+</Window>

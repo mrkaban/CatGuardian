@@ -1,0 +1,621 @@
+<UserControl x:Class="CatGuardian.UI.Views.AntivirusView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:views="clr-namespace:CatGuardian.UI.Views"
+             xmlns:loc="clr-namespace:CatGuardian.UI.Localization">
+    <DockPanel>
+        <TabControl x:Name="MainTabs" DockPanel.Dock="Top" Margin="0,0,0,10" SelectionChanged="OnTabChanged">
+            <TabItem Header="{loc:Loc Av.TabScanner}"/>
+            <!-- Проактивная защита — вкладка внутри «Антивируса» (3.0.0.6).
+                 Порядок вкладок (3.0.0.19): Сканер, Проактивная защита, События,
+                 Карантин, Обновление баз, Настройки. -->
+            <TabItem Header="{loc:Loc Av.TabProactive}"/>
+            <!-- 3.0.0.18: журнал защитных сработок (вирусы + проактивная защита). -->
+            <TabItem Header="{loc:Loc Av.TabEvents}"/>
+            <TabItem Header="{loc:Loc Av.TabQuarantine}"/>
+            <TabItem Header="{loc:Loc Av.TabUpdates}"/>
+            <TabItem Header="{loc:Loc Fw.TabSettings}"/>
+        </TabControl>
+
+        <Grid>
+            <!-- Сканер (полный редизайн: без drag&drop и без пустой таблицы результатов).
+                 HorizontalScrollBarVisibility=Disabled: ScrollViewer с Auto-горизонталью даёт
+                 содержимому БЕСКОНЕЧНУЮ ширину, из-за чего DataGrid результатов схлопывает
+                 колонку Width="*" до минимума (#11). -->
+            <ScrollViewer x:Name="ScannerPanel" VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled">
+                <StackPanel Margin="0,0,8,8">
+
+                    <!-- Шапка с общим статусом -->
+                    <Grid Margin="0,0,0,12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource SectionTitleUpper}" Text="{loc:Loc Av.ResidentTitle}"/>
+                            <TextBlock Text="{loc:Loc Av.ResidentSubtitle}" Foreground="{DynamicResource MutedBrush}" Margin="0,4,0,0"/>
+                        </StackPanel>
+                        <Border Grid.Column="1" Style="{StaticResource Card}" Padding="14,9">
+                            <StackPanel Orientation="Horizontal">
+                                <Ellipse x:Name="ResidentDot" Width="12" Height="12" Fill="{DynamicResource GreenBrush}"
+                                         VerticalAlignment="Center"/>
+                                <TextBlock x:Name="AvResident" Text="{loc:Loc Av.ProtectionActive}" FontFamily="Segoe UI Emoji"
+                                           FontWeight="Bold" Margin="8,0,0,0" Foreground="{DynamicResource GreenBrush}"/>
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+
+                    <!-- Карточки состояния -->
+                    <UniformGrid Columns="4" Margin="0,0,0,14">
+                        <Border Style="{StaticResource Card}" Padding="14" Margin="0,0,6,0">
+                            <StackPanel>
+                                <TextBlock Text="{loc:Loc Av.ResidentProtection}" Foreground="{DynamicResource MutedBrush}" FontSize="12"/>
+                                <TextBlock x:Name="StatResident" Text="—" FontSize="18" FontWeight="SemiBold" Margin="0,6,0,0" TextWrapping="Wrap"/>
+                            </StackPanel>
+                        </Border>
+                        <Border Style="{StaticResource Card}" Padding="14" Margin="6,0">
+                            <StackPanel>
+                                <TextBlock Text="{loc:Loc Av.SignatureBases}" Foreground="{DynamicResource MutedBrush}" FontSize="12"/>
+                                <TextBlock x:Name="StatBases" Text="—" FontSize="18" FontWeight="SemiBold" Margin="0,6,0,0" TextWrapping="Wrap"/>
+                            </StackPanel>
+                        </Border>
+                        <Border Style="{StaticResource Card}" Padding="14" Margin="6,0">
+                            <StackPanel>
+                                <TextBlock Text="{loc:Loc Av.TabQuarantine}" Foreground="{DynamicResource MutedBrush}" FontSize="12"/>
+                                <TextBlock x:Name="StatQuarantine" Text="0" FontSize="18" FontWeight="SemiBold" Margin="0,6,0,0" TextWrapping="Wrap"/>
+                            </StackPanel>
+                        </Border>
+                        <Border Style="{StaticResource Card}" Padding="14" Margin="6,0,0,0">
+                            <StackPanel>
+                                <TextBlock Text="{loc:Loc Av.LastScan}" Foreground="{DynamicResource MutedBrush}" FontSize="12"/>
+                                <TextBlock x:Name="StatLastScan" Text="{loc:Loc Av.NeverScanned}" FontSize="14" FontWeight="SemiBold" Margin="0,6,0,0" TextWrapping="Wrap"/>
+                            </StackPanel>
+                        </Border>
+                    </UniformGrid>
+
+                    <!-- Быстрая проверка -->
+                    <Border Style="{StaticResource Card}" Padding="20">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <StackPanel>
+                                <TextBlock Text="{loc:Loc Av.QuickScan}" FontFamily="Segoe UI Emoji" FontSize="16" FontWeight="Bold" Foreground="{DynamicResource TextBrush}"/>
+                                <TextBlock Text="{loc:Loc Av.QuickScanHint}"
+                                           Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,6,0,0"/>
+                            </StackPanel>
+                            <Button Grid.Column="1" Content="{loc:Loc Av.ScanNow}" FontFamily="Segoe UI Emoji"
+                                    Style="{StaticResource PrimaryButton}" FontSize="15" Padding="18,10"
+                                    VerticalAlignment="Center" Click="OnQuickScan"/>
+                        </Grid>
+                    </Border>
+
+                    <!-- Выбор объектов для проверки -->
+                    <Border Style="{StaticResource Card}" Margin="0,14,0,0" Padding="16">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource SectionTitle}" Text="{loc:Loc Av.CustomScan}"/>
+                            <TextBlock Text="{loc:Loc Av.CustomScanHint}"
+                                       Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,4,0,0"/>
+                            <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                                <Button Content="{loc:Loc Av.PickFolder}" FontFamily="Segoe UI Emoji" Click="OnBrowseFolder"/>
+                                <Button Content="{loc:Loc Av.PickFile}" FontFamily="Segoe UI Emoji" Margin="8,0,0,0" Click="OnBrowseFile"/>
+                                <Button Content="{loc:Loc Av.DriveC}" FontFamily="Segoe UI Emoji" Margin="8,0,0,0" Click="OnScanDriveRoot"/>
+                                <Button Content="{loc:Loc Av.Downloads}" FontFamily="Segoe UI Emoji" Margin="8,0,0,0" Click="OnScanDownloads"/>
+                            </StackPanel>
+                            <ListBox x:Name="AvObjectList" Height="90" Margin="0,10,0,0"
+                                     ToolTip="{loc:Loc Av.ObjectsTooltip}"/>
+                            <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                                <Button Content="{loc:Loc Av.ClearSelection}" Click="OnClearObjects"/>
+                                <Button Content="{loc:Loc Av.StartScan}" FontFamily="Segoe UI Emoji"
+                                        Style="{StaticResource PrimaryButton}" Margin="12,0,0,0" Click="OnScan"/>
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Ход и статус: скрывается целиком, когда нечего показывать (3.0.0.15) -->
+                    <StackPanel x:Name="AvStatusPanel" Margin="0,10,0,0" Visibility="Collapsed">
+                        <ProgressBar x:Name="AvProgress" Height="8" Maximum="100" IsIndeterminate="True" Visibility="Collapsed"/>
+                        <TextBlock x:Name="AvStatus" Margin="0,8,0,0" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap"/>
+                    </StackPanel>
+
+                    <!-- Последние проверки: карточка скрыта, пока нет записей (не «пустая таблица»).
+                         Оформление как у таблицы приманок (#11): Card без внутренних отступов +
+                         Grid вместо StackPanel, иначе DataGrid получает бесконечную предлагаемую
+                         ширину и колонка Width="*" схлопывается до 1px (#7). -->
+                    <StackPanel x:Name="ScanResultsCard" Margin="0,14,0,0" Visibility="Collapsed">
+                        <TextBlock Style="{StaticResource SectionTitle}" Text="{loc:Loc Av.RecentScans}"/>
+                        <Border Style="{StaticResource Card}" Padding="0">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                </Grid.RowDefinitions>
+                                <DataGrid x:Name="ScanResults" AutoGenerateColumns="False" IsReadOnly="True"
+                                          MaxHeight="210" BorderThickness="0" SelectionMode="Single"
+                                          RowHeight="28" HorizontalScrollBarVisibility="Disabled"
+                                          MouseDoubleClick="OnScanResultsDoubleClick"
+                                          ToolTip="{loc:Loc Av.RowDblClickTooltip}">
+                                    <DataGrid.Columns>
+                                        <DataGridTextColumn Header="{loc:Loc Fw.ColAdded}" Binding="{Binding TimeText}" Width="135"/>
+                                        <DataGridTextColumn Header="{loc:Loc Av.ColScanType}" Binding="{Binding KindText}" Width="*"/>
+                                        <DataGridTextColumn Header="{loc:Loc Av.ColObjects}" Binding="{Binding ObjectsText}" Width="80"/>
+                                        <DataGridTextColumn Header="{loc:Loc Av.ColThreats}" Binding="{Binding ThreatsText}" Width="55"/>
+                                        <DataGridTextColumn Header="{loc:Loc Fw.ColTime}" Binding="{Binding DurationText}" Width="65"/>
+                                        <DataGridTextColumn Header="{loc:Loc Fw.ColState}" Binding="{Binding Status}" Width="110"/>
+                                    </DataGrid.Columns>
+                                </DataGrid>
+                                <TextBlock x:Name="ScanResultsHint" Grid.Row="1" Foreground="{DynamicResource MutedBrush}"
+                                           FontSize="12" Margin="14,8,14,10"/>
+                            </Grid>
+                        </Border>
+                    </StackPanel>
+                </StackPanel>
+            </ScrollViewer>
+
+            <!-- Карантин -->
+            <Grid x:Name="QuarantinePanel" Visibility="Collapsed">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                <StackPanel Grid.Row="0" Margin="0,0,0,8">
+                    <TextBlock Style="{StaticResource SectionTitleUpper}" Text="{loc:Loc Av.QuarTitle}"/>
+                    <TextBlock x:Name="QuarHint" Foreground="{DynamicResource MutedBrush}" Margin="0,6,0,0"/>
+                </StackPanel>
+                <DataGrid x:Name="QuarantineGrid" Grid.Row="1" AutoGenerateColumns="False" IsReadOnly="True">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="{loc:Loc Av.ColVirus}" Binding="{Binding VirusName}" Width="220"/>
+                        <DataGridTextColumn Header="{loc:Loc Av.ColOriginalFile}" Binding="{Binding OriginalPath}" Width="*"/>
+                        <DataGridTextColumn Header="{loc:Loc Fw.ColAdded}" Binding="{Binding DateText}" Width="130"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+                <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,10,0,0">
+                    <Button Content="{loc:Loc Av.BtnRestore}" FontFamily="Segoe UI Emoji" Click="OnRestore"/>
+                    <Button Content="{loc:Loc Av.BtnDeleteForever}" FontFamily="Segoe UI Emoji" Margin="8,0,0,0" Click="OnDelete"/>
+                    <Button Content="{loc:Loc Av.BtnRestoreTo}" FontFamily="Segoe UI Emoji" Margin="8,0,0,0" Click="OnRestoreTo"/>
+                </StackPanel>
+            </Grid>
+
+            <!-- Обновление баз (3.0.0.7: улучшенный макет; автообновление включается в «Настройках») -->
+            <ScrollViewer x:Name="UpdatePanel" Visibility="Collapsed" VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled">
+                <StackPanel MaxWidth="880" HorizontalAlignment="Left" Margin="0,0,8,8">
+
+                    <!-- Статус защиты -->
+                    <Border Style="{StaticResource Card}" Padding="16">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource SectionTitleUpper}" Text="{loc:Loc Av.UpdatesTitle}"/>
+                            <Grid Margin="0,12,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Orientation="Horizontal">
+                                    <Ellipse x:Name="BasesStatusDot" Width="12" Height="12"
+                                             Fill="{DynamicResource GreenBrush}" VerticalAlignment="Center"/>
+                                    <TextBlock x:Name="BasesStatusText" Text="{loc:Loc Av.BasesUpToDate}"
+                                               FontWeight="Bold" FontSize="14" Margin="8,0,0,0"
+                                               Foreground="{DynamicResource GreenBrush}"/>
+                                </StackPanel>
+                                <TextBlock x:Name="BasesLastCheck" Grid.Column="1"
+                                           Text="{loc:Loc Av.LastBackgroundCheck}"
+                                           Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap"
+                                           Margin="24,0,0,0" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                            </Grid>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Текущие базы сигнатур -->
+                    <Border Style="{StaticResource Card}" Margin="0,12,0,0" Padding="0">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource SectionTitle}" Text="{loc:Loc Av.CurrentBases}"
+                                       Margin="16,14,16,6"/>
+                            <DataGrid x:Name="BasesGrid" AutoGenerateColumns="False" IsReadOnly="True"
+                                      BorderThickness="0" MaxHeight="240" RowHeight="30" SelectionMode="Single"
+                                      HeadersVisibility="Column" HorizontalScrollBarVisibility="Disabled">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="{loc:Loc Av.ColBaseFile}" Binding="{Binding Name}" Width="*"/>
+                                    <DataGridTextColumn Header="{loc:Loc Av.ColVersion}" Binding="{Binding Version}" Width="90"/>
+                                    <DataGridTextColumn Header="{loc:Loc Av.ColSignatureCount}" Binding="{Binding SignaturesText}" Width="120"/>
+                                    <DataGridTextColumn Header="{loc:Loc Av.ColDiskSize}" Binding="{Binding SizeText}" Width="120"/>
+                                    <!-- Дата изменения файла базы — нагляднее числа сигнатур (3.0.0.10). -->
+                                    <DataGridTextColumn Header="{loc:Loc Fw.ColUpdated}" Binding="{Binding DateText}" Width="140"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                            <TextBlock x:Name="BasesPath" Foreground="{DynamicResource MutedBrush}" FontSize="12"
+                                       Margin="16,10,16,14" TextWrapping="Wrap"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Управление обновлениями: только информация (переключатель — в «Настройках») -->
+                    <Border Style="{StaticResource Card}" Margin="0,12,0,0" Padding="16">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource SectionTitle}" Text="{loc:Loc Av.UpdatesControl}"/>
+                            <TextBlock x:Name="UpdateAutoInfo" TextWrapping="Wrap" LineHeight="22"
+                                       Foreground="{DynamicResource MutedBrush}" Margin="0,4,0,0"/>
+                            <TextBlock Text="{loc:Loc Av.AutoUpdateHint}"
+                                       TextWrapping="Wrap" LineHeight="20"
+                                       Foreground="{DynamicResource MutedBrush}" Margin="0,4,0,0"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Ручной запуск freshclam -->
+                    <Border Style="{StaticResource Card}" Margin="0,12,0,0" Padding="16">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource SectionTitle}" Text="{loc:Loc Av.FreshclamTitle}"/>
+                            <TextBlock Text="{loc:Loc Av.FreshclamHint}"
+                                       TextWrapping="Wrap" LineHeight="22"
+                                       Foreground="{DynamicResource MutedBrush}" Margin="0,4,0,0"/>
+                            <Button Content="{loc:Loc Av.BtnCheckUpdate}" Style="{StaticResource PrimaryButton}"
+                                    HorizontalAlignment="Left" Margin="0,12,0,0" Click="OnUpdateDatabase"/>
+                            <ProgressBar x:Name="UpdateProgress" Height="16" Margin="0,12,0,0" Maximum="100"/>
+                            <TextBlock x:Name="UpdateStatus" Foreground="{DynamicResource MutedBrush}" Margin="0,8,0,0"
+                                       TextWrapping="Wrap"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Движок ClamAV: проверка версий и обновление (3.0.0.10) -->
+                    <Border Style="{StaticResource Card}" Margin="0,12,0,0" Padding="16">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource SectionTitle}" Text="{loc:Loc Av.EngineTitle}"/>
+                            <TextBlock Text="{loc:Loc Av.EngineHint}"
+                                       TextWrapping="Wrap" LineHeight="22"
+                                       Foreground="{DynamicResource MutedBrush}" Margin="0,4,0,0"/>
+                            <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                                <TextBlock x:Name="ClamAvVersionInfo" Text="{loc:Loc Av.VersionChecking}"
+                                           VerticalAlignment="Center" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                                <Button x:Name="ClamAvUpdateBtn" Content="{loc:Loc Av.BtnUpdateEngine}" FontFamily="Segoe UI Emoji"
+                                        Style="{StaticResource PrimaryButton}" Margin="16,0,0,0"
+                                        Padding="14,8" IsEnabled="False" Click="OnUpdateClamAv"/>
+                            </StackPanel>
+                            <ProgressBar x:Name="ClamAvProgress" Height="12" Margin="0,10,0,0" Maximum="100"/>
+                            <TextBlock x:Name="ClamAvStatus" Foreground="{DynamicResource MutedBrush}" Margin="0,8,0,0"
+                                       TextWrapping="Wrap"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Журнал freshclam -->
+                    <Border Style="{StaticResource Card}" Margin="0,12,0,0" Padding="16">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource SectionTitle}" Text="{loc:Loc Av.FreshclamLogTitle}"/>
+                            <TextBox x:Name="UpdateLog" IsReadOnly="True" FontFamily="Consolas" FontSize="12"
+                                     TextWrapping="NoWrap" VerticalScrollBarVisibility="Auto"
+                                     HorizontalScrollBarVisibility="Disabled" Height="200" AcceptsReturn="True"
+                                     Text="{loc:Loc Av.LogPlaceholder}" Margin="0,8,0,0"/>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+            </ScrollViewer>
+
+            <!-- Проактивная защита: отдельное представление, встроенное во вкладку (3.0.0.6). -->
+            <Grid x:Name="ProactivePanel" Visibility="Collapsed" Margin="0,0,8,0">
+                <views:ProactiveProtectionView x:Name="ProactiveHost"/>
+            </Grid>
+
+            <!-- Журнал событий защиты (3.0.0.18): вирусы и сработки проактивной защиты.
+                 Данные — guardian.db (events), показываются ТОЛЬКО защитные источники:
+                 Antivirus, Ransomware, Honeypot, AutoStart, Entropy, Etw, Wmi, Firewall.
+                 Журнал мониторинга целостности (File/Registry) остаётся в Инспекторе. -->
+            <Grid x:Name="EventsPanel" Visibility="Collapsed" Margin="0,0,8,0">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <!-- Шапка (3.0.0.86-fix: длинное описание убрано — занимало место и давило фильтры) -->
+                <StackPanel Grid.Row="0" Margin="0,0,0,8">
+                    <TextBlock Style="{StaticResource SectionTitleUpper}" Text="{loc:Loc Av.EventsTitle}"/>
+                </StackPanel>
+
+                <!-- Фильтры -->
+                <StackPanel Grid.Row="1" Margin="0,0,0,8">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="{loc:Loc Av.Module}" Foreground="{DynamicResource MutedBrush}" VerticalAlignment="Center"/>
+                        <ComboBox x:Name="EventsModuleFilter" Width="190" Margin="8,0,0,0"
+                                  SelectionChanged="OnEventsFilterChanged"/>
+                        <TextBlock Text="{loc:Loc Av.Level}" Foreground="{DynamicResource MutedBrush}" VerticalAlignment="Center" Margin="16,0,0,0"/>
+                        <ComboBox x:Name="EventsLevelFilter" Width="150" Margin="8,0,0,0"
+                                  SelectionChanged="OnEventsFilterChanged"/>
+                        <Button Content="{loc:Loc Av.BtnClearLog}" Margin="16,0,0,0" Click="OnClearEvents"
+                                ToolTip="{loc:Loc Av.ClearLogTooltip}"/>
+                    </StackPanel>
+                    <!-- 3.0.0.86: лимит выборки и фильтр по дате (диапазон передаётся в SQL до LIMIT). -->
+                    <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                        <TextBlock Text="{loc:Loc Ins.LimitLabel}" Foreground="{DynamicResource MutedBrush}" VerticalAlignment="Center"/>
+                        <!-- 3.0.0.86-fix: SelectedIndex задаётся в коде ПОСЛЕ создания всех контролов —
+                             иначе SelectionChanged при загрузке XAML обращался к ещё не созданным
+                             EventsFrom/EventsTo (NullReferenceException, вкладка не открывалась). -->
+                        <ComboBox x:Name="EventsLimit" Width="80" Margin="6,0,0,0"
+                                  SelectionChanged="OnEventsFilterChanged">
+                            <ComboBoxItem Content="100" Tag="100"/>
+                            <ComboBoxItem Content="500" Tag="500"/>
+                            <ComboBoxItem Content="1000" Tag="1000"/>
+                            <ComboBoxItem Content="5000" Tag="5000"/>
+                        </ComboBox>
+                        <TextBlock Text="{loc:Loc Ins.FromLabel}" Foreground="{DynamicResource MutedBrush}" VerticalAlignment="Center" Margin="12,0,0,0"/>
+                        <DatePicker x:Name="EventsFrom" Width="125" Margin="6,0,0,0"
+                                    SelectedDateChanged="OnEventsDateChanged" LostFocus="OnEventsDateLostFocus"
+                                    ToolTip="{loc:Loc Ins.FromTooltip}"/>
+                        <TextBlock Text="{loc:Loc Ins.ToLabel}" Foreground="{DynamicResource MutedBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                        <DatePicker x:Name="EventsTo" Width="125" Margin="6,0,0,0"
+                                    SelectedDateChanged="OnEventsDateChanged" LostFocus="OnEventsDateLostFocus"
+                                    ToolTip="{loc:Loc Ins.ToTooltip}"/>
+                        <Button Content="{loc:Loc Ins.PresetToday}" Margin="12,0,0,0" Tag="today" Click="OnEventsPresetClick"/>
+                        <Button Content="{loc:Loc Ins.Preset7d}" Margin="6,0,0,0" Tag="7d" Click="OnEventsPresetClick"/>
+                        <Button Content="{loc:Loc Ins.Preset30d}" Margin="6,0,0,0" Tag="30d" Click="OnEventsPresetClick"/>
+                        <Button Content="{loc:Loc Ins.PresetAll}" Margin="6,0,0,0" Tag="all" Click="OnEventsPresetClick"/>
+                    </StackPanel>
+                    <!-- 3.0.0.86-fix: статус на отдельной строке полной ширины — раньше в одном ряду
+                         с фильтрами обрезался (особенно с подписью «Период: …»). -->
+                    <TextBlock x:Name="EvStatusText" Foreground="{DynamicResource MutedBrush}"
+                               Margin="0,6,0,0" TextWrapping="Wrap"/>
+                </StackPanel>
+
+                <!-- Таблица событий -->
+                <DataGrid x:Name="EventsGrid" Grid.Row="2" AutoGenerateColumns="False" IsReadOnly="True"
+                          BorderThickness="0" MaxHeight="230" RowHeight="28" SelectionMode="Single"
+                          SelectionChanged="OnEventsSelectionChanged"
+                          HorizontalScrollBarVisibility="Disabled"
+                          ToolTip="{loc:Loc Av.EventsRowTooltip}">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="{loc:Loc Fw.ColTime}" Binding="{Binding TimeText}" Width="135"/>
+                        <DataGridTextColumn Header="{loc:Loc Av.Module}" Binding="{Binding ModuleText}" Width="150"/>
+                        <DataGridTextColumn Header="{loc:Loc Fw.ColEvent}" Binding="{Binding TypeText}" Width="170"/>
+                        <DataGridTextColumn Header="{loc:Loc Av.ColTargetPath}" Binding="{Binding Target}" Width="*"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+
+                <!-- Детали выбранного события -->
+                <Border Grid.Row="3" Style="{StaticResource Card}" Padding="14" Margin="0,10,0,0">
+                    <StackPanel>
+                        <TextBlock Style="{StaticResource SectionTitle}" Text="{loc:Loc Av.EventDetailsTitle}"/>
+                        <Grid Margin="0,8,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" Text="{loc:Loc Fw.ColTime}" Foreground="{DynamicResource MutedBrush}"
+                                       VerticalAlignment="Top" Margin="0,2,12,0"/>
+                            <TextBox Grid.Row="0" Grid.Column="1" x:Name="EvDetailTime" IsReadOnly="True"
+                                     TextWrapping="Wrap" BorderThickness="0" Background="Transparent"
+                                     Foreground="{DynamicResource TextBrush}" FontSize="12" Padding="0,2"/>
+                            <TextBlock Grid.Row="1" Text="{loc:Loc Av.Source}" Foreground="{DynamicResource MutedBrush}"
+                                       VerticalAlignment="Top" Margin="0,2,12,0"/>
+                            <TextBox Grid.Row="1" Grid.Column="1" x:Name="EvDetailSource" IsReadOnly="True"
+                                     TextWrapping="Wrap" BorderThickness="0" Background="Transparent"
+                                     Foreground="{DynamicResource TextBrush}" FontSize="12" Padding="0,2"/>
+                            <TextBlock Grid.Row="2" Text="{loc:Loc Rdr.Description}" Foreground="{DynamicResource MutedBrush}"
+                                       VerticalAlignment="Top" Margin="0,2,12,0"/>
+                            <TextBox Grid.Row="2" Grid.Column="1" x:Name="EvDetailDesc" IsReadOnly="True"
+                                     TextWrapping="Wrap" AcceptsReturn="True" MinHeight="40" MaxHeight="110"
+                                     VerticalScrollBarVisibility="Auto" BorderThickness="0"
+                                     Background="Transparent" Foreground="{DynamicResource TextBrush}"
+                                     FontSize="12" Padding="0,2"/>
+                            <TextBlock Grid.Row="3" Text="{loc:Loc Sdw.LogTitle}" Foreground="{DynamicResource MutedBrush}"
+                                       VerticalAlignment="Top" Margin="0,2,12,0"/>
+                            <TextBox Grid.Row="3" Grid.Column="1" x:Name="EvDetailDetail" IsReadOnly="True"
+                                     TextWrapping="Wrap" AcceptsReturn="True" MinHeight="40" MaxHeight="160"
+                                     VerticalScrollBarVisibility="Auto" BorderThickness="0"
+                                     Background="Transparent" Foreground="{DynamicResource TextBrush}"
+                                     FontFamily="Consolas" FontSize="12" Padding="0,2"/>
+                        </Grid>
+                        <TextBlock x:Name="EvActionStatus" Foreground="{DynamicResource MutedBrush}"
+                                   Margin="0,8,0,0" TextWrapping="Wrap"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- Кнопки -->
+                <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
+                    <Button Content="{loc:Loc Av.BtnCopyEvent}" Margin="0,0,8,0" Click="OnCopyEvent"/>
+                    <Button x:Name="EvOpenFolderBtn" Content="{loc:Loc Av.BtnOpenTargetFolder}" Margin="0,0,8,0"
+                            Click="OnOpenEventFolder"/>
+                    <Button Content="{loc:Loc Av.BtnGoQuarantine}" Margin="0,0,8,0" Click="OnOpenQuarantineEvents"/>
+                </StackPanel>
+            </Grid>
+
+            <!-- Настройки -->
+            <ScrollViewer x:Name="ConfigPanel" Visibility="Collapsed" VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled">
+                <!-- Растягиваем на всю ширину окна: карточки в два столбца занимают весь
+                     доступный объём, а не узкую полосу слева (п.4). -->
+                <StackPanel Margin="0,0,8,8">
+                    <TextBlock Style="{StaticResource SectionTitleUpper}" Text="{loc:Loc Av.SettingsTitle}"/>
+
+                    <!-- Интеграция в контекстное меню Проводника (3.0.0.19, Shell Extension).
+                         Правый клик по файлу/папке → «Проверить с помощью Cat Guardian».
+                         Дублируется в общих настройках панели (вкладка «Настройки»). -->
+                    <Border Style="{StaticResource Card}" Padding="16" Margin="0,10,0,0">
+                        <StackPanel>
+                            <CheckBox x:Name="ChkCtxMenuIntegration"
+                                      Content="{loc:Loc Av.CtxMenuIntegration}"
+                                      FontSize="13" VerticalAlignment="Center"
+                                      Checked="ChkCtxMenuIntegration_Checked"
+                                      Unchecked="ChkCtxMenuIntegration_Unchecked"/>
+                            <TextBlock Style="{StaticResource SubLabel}" TextWrapping="Wrap" Margin="24,2,0,0"
+                                       Text="{loc:Loc Av.CtxMenuHint}"/>
+                        </StackPanel>
+                    </Border>
+
+                    <Grid Margin="0,10,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+
+                        <!-- Основные -->
+                        <Border Grid.Column="0" Style="{StaticResource Card}" Padding="16" Margin="0,0,6,0">
+                            <StackPanel>
+                                <CheckBox x:Name="CfgAntivirusEnabled" Content="{loc:Loc Av.AvEnabled}"
+                                          FontFamily="Segoe UI Emoji" FontWeight="Bold" FontSize="14"
+                                          Margin="0,0,0,10"/>
+                                <TextBlock Style="{StaticResource SectionTitle}" Text="{loc:Loc Av.SecMain}"/>
+                                <TextBlock Text="{loc:Loc Av.ClamDir}" Foreground="{DynamicResource MutedBrush}" Margin="0,8,0,2"/>
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBox x:Name="CfgClamDir" Width="250"/>
+                                    <Button Content="…" Width="34" Margin="4,0,0,0" Click="OnBrowseClamDir"/>
+                                </StackPanel>
+                                <TextBlock Text="{loc:Loc Av.TabQuarantine}" Foreground="{DynamicResource MutedBrush}" Margin="0,12,0,2"/>
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBox x:Name="CfgQuarDir" Width="250"/>
+                                    <Button Content="…" Width="34" Margin="4,0,0,0" Click="OnBrowseQuarDir"/>
+                                </StackPanel>
+                                <TextBlock Text="{loc:Loc Av.UpdateServer}" Foreground="{DynamicResource MutedBrush}" Margin="0,12,0,2"/>
+                                <TextBox x:Name="CfgUpdateServer" Width="290"/>
+                                <CheckBox x:Name="CfgAutoUpdate" Content="{loc:Loc Av.AutoUpdate}" Margin="0,12,0,0"/>
+                                <TextBlock Style="{StaticResource SubLabel}" TextWrapping="Wrap" Margin="24,2,0,6"
+                                           Text="{loc:Loc Av.AutoUpdateHint2}"/>
+                                <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                                    <TextBlock Text="{loc:Loc Av.CheckUpdates}" Foreground="{DynamicResource MutedBrush}" VerticalAlignment="Center"/>
+                                    <ComboBox x:Name="CfgUpdateHours" Width="230" Margin="8,0,0,0"
+                                              ToolTip="{loc:Loc Av.CheckUpdatesTooltip}">
+                                        <ComboBoxItem Content="{loc:Loc Av.Update4x}" Tag="6"/>
+                                        <ComboBoxItem Content="{loc:Loc Av.Update3x}" Tag="8"/>
+                                        <ComboBoxItem Content="{loc:Loc Av.Update2x}" Tag="12"/>
+                                        <ComboBoxItem Content="{loc:Loc Av.Update1x}" Tag="24"/>
+                                    </ComboBox>
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- Сканирование -->
+                        <Border Grid.Column="1" Style="{StaticResource Card}" Padding="16" Margin="6,0,0,0">
+                            <StackPanel>
+                                <TextBlock Style="{StaticResource SectionTitle}" Text="{loc:Loc Av.SecScanning}"/>
+                                <CheckBox x:Name="CfgMonitorSystem" Content="{loc:Loc Av.MonitorFiles}" Margin="0,10,0,0"/>
+                                <TextBlock Style="{StaticResource SubLabel}" TextWrapping="Wrap" Margin="24,2,0,6"
+                                           Text="{loc:Loc Av.MonitorFilesHint}"/>
+                                <CheckBox x:Name="CfgDetectDrives" Content="{loc:Loc Av.WatchDrives}" Margin="0,6,0,0"/>
+                                <TextBlock Style="{StaticResource SubLabel}" TextWrapping="Wrap" Margin="24,2,0,6"
+                                           Text="{loc:Loc Av.WatchDrivesHint}"/>
+                                <CheckBox x:Name="CfgAskDrives" Content="{loc:Loc Av.AskDrives}" Margin="0,6,0,0"/>
+                                <TextBlock Style="{StaticResource SubLabel}" TextWrapping="Wrap" Margin="24,2,0,6"
+                                           Text="{loc:Loc Av.AskDrivesHint}"/>
+                                <!-- «Мониторить запуск процессов» перенесён в «Проактивную защиту»
+                                     (вкладка антивируса, 3.0.0.6) — пункт «Контроль процессов и ETW». -->
+                                <CheckBox x:Name="CfgMemoryScan" Content="{loc:Loc Av.MemoryScan}" Margin="0,6,0,0"/>
+                                <TextBlock Style="{StaticResource SubLabel}" TextWrapping="Wrap" Margin="24,2,0,6"
+                                           Text="{loc:Loc Av.MemoryScanHint}"/>
+                                <CheckBox x:Name="CfgResidentClamd" Margin="0,6,0,0"
+                                          ToolTip="{loc:Loc Av.ResidentClamdTooltip}">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="{loc:Loc Av.ResidentClamd}" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </CheckBox>
+                                <TextBlock Style="{StaticResource SubLabel}" TextWrapping="Wrap" Margin="24,2,0,6"
+                                           Text="{loc:Loc Av.ResidentClamdHint}"/>
+                                <!-- 3.0.0.17 «Гибрид + реактивность»: режим сканирования, порог ОЗУ,
+                                     интервал досмотра, горячие каталоги, реакция на вирус. -->
+                                <TextBlock Style="{StaticResource SectionTitle}" Text="{loc:Loc Av.ScanMode}" Margin="0,12,0,0"/>
+                                <ComboBox x:Name="CfgScannerMode" Width="290" Margin="0,4,0,0"
+                                          ToolTip="{loc:Loc Av.ScanModeTooltip}">
+                                    <ComboBoxItem Content="{loc:Loc Av.ModeAdaptive}" Tag="0"/>
+                                    <ComboBoxItem Content="{loc:Loc Av.ModeAlwaysClamd}" Tag="1"/>
+                                    <ComboBoxItem Content="{loc:Loc Av.ModeClamscan}" Tag="2"/>
+                                </ComboBox>
+                                <TextBlock Style="{StaticResource SubLabel}" TextWrapping="Wrap" Margin="0,2,0,6"
+                                           Text="{loc:Loc Av.ModeHybridHint}"/>
+                                <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                                    <TextBlock Text="{loc:Loc Av.RamThreshold}" Foreground="{DynamicResource MutedBrush}" VerticalAlignment="Center"/>
+                                    <TextBox x:Name="CfgClamdRamGb" Width="50" Margin="8,0,0,0"
+                                             ToolTip="{loc:Loc Av.RamThresholdTooltip}"/>
+                                </StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                    <TextBlock Text="{loc:Loc Av.SweepInterval}" Foreground="{DynamicResource MutedBrush}" VerticalAlignment="Center"/>
+                                    <TextBox x:Name="CfgSweepInterval" Width="50" Margin="8,0,0,0"
+                                             ToolTip="{loc:Loc Av.SweepIntervalTooltip}"/>
+                                </StackPanel>
+                                <CheckBox x:Name="CfgHotFoldersEnabled" Margin="0,10,0,0"
+                                          ToolTip="{loc:Loc Av.HotFoldersTooltip}">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="{loc:Loc Av.HotFolders}" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </CheckBox>
+                                <TextBlock Style="{StaticResource SubLabel}" TextWrapping="Wrap" Margin="24,2,0,6"
+                                           Text="{loc:Loc Av.HotFoldersHint}"/>
+                                <TextBlock Text="{loc:Loc Av.HotFoldersList}" Foreground="{DynamicResource MutedBrush}" Margin="0,6,0,2"/>
+                                <TextBox x:Name="CfgHotFoldersList" Width="290"/>
+                                <TextBlock Text="{loc:Loc Av.VirusReaction}" Foreground="{DynamicResource MutedBrush}" Margin="0,12,0,2"/>
+                                <ComboBox x:Name="CfgVirusAlertMode" Width="220"
+                                          ToolTip="{loc:Loc Av.VirusReactionTooltip}">
+                                    <ComboBoxItem Content="{loc:Loc Av.ReactionDialog}"/>
+                                    <ComboBoxItem Content="{loc:Loc Av.ReactionTray}"/>
+                                    <ComboBoxItem Content="{loc:Loc Av.ReactionNone}"/>
+                                </ComboBox>
+                                <TextBlock Text="{loc:Loc Av.InfectedAction}" Foreground="{DynamicResource MutedBrush}" Margin="0,14,0,2"/>
+                                <ComboBox x:Name="CfgInfectedAction" Width="220"
+                                          ToolTip="{loc:Loc Av.InfectedActionTooltip}">
+                                    <ComboBoxItem Content="{loc:Loc Av.ActionQuarantine}"/>
+                                    <ComboBoxItem Content="{loc:Loc Av.ActionNotify}"/>
+                                </ComboBox>
+                                <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                                    <TextBlock Text="{loc:Loc Av.MaxScans}" Foreground="{DynamicResource MutedBrush}" VerticalAlignment="Center"/>
+                                    <TextBox x:Name="CfgMaxScans" Width="50" Margin="8,0,0,0"
+                                             ToolTip="{loc:Loc Av.MaxScansTooltip}"/>
+                                </StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                    <TextBlock Text="{loc:Loc Av.NoRescan}" Foreground="{DynamicResource MutedBrush}" VerticalAlignment="Center"/>
+                                    <TextBox x:Name="CfgNoRescan" Width="50" Margin="8,0,0,0"
+                                             ToolTip="{loc:Loc Av.NoRescanTooltip}"/>
+                                </StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                    <TextBlock Text="{loc:Loc Av.BatchSize}" Foreground="{DynamicResource MutedBrush}" VerticalAlignment="Center"/>
+                                    <TextBox x:Name="CfgBatchSize" Width="50" Margin="8,0,0,0"
+                                             ToolTip="{loc:Loc Av.BatchSizeTooltip}"/>
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+
+                    <!-- Каталоги, расширения и исключения — на всю ширину ниже -->
+                    <Border Style="{StaticResource Card}" Padding="16" Margin="0,12,0,0">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource SectionTitle}" Text="{loc:Loc Av.SecDirsExclusions}"/>
+                            <Grid Margin="0,8,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0">
+                                    <TextBlock Text="{loc:Loc Av.ScanDirs}" Foreground="{DynamicResource MutedBrush}" Margin="0,0,0,2"/>
+                                    <ListBox x:Name="CfgDirsList" Height="110"/>
+                                    <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                                        <Button Content="{loc:Loc Av.BtnAddPath}" Click="OnAddScanDir"/>
+                                        <Button Content="{loc:Loc Fw.BtnDelete}" Margin="8,0,0,0" Click="OnRemoveScanDir"/>
+                                    </StackPanel>
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Margin="10,0,0,0">
+                                    <TextBlock Text="{loc:Loc Av.PathExclusions}" Foreground="{DynamicResource MutedBrush}" Margin="0,0,0,2"/>
+                                    <ListBox x:Name="CfgExclList" Height="110"/>
+                                    <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                                        <Button Content="{loc:Loc Av.BtnAddPath}" Click="OnAddExclusion"/>
+                                        <Button Content="{loc:Loc Fw.BtnDelete}" Margin="8,0,0,0" Click="OnRemoveExclusion"/>
+                                    </StackPanel>
+                                </StackPanel>
+                            </Grid>
+                            <TextBlock Text="{loc:Loc Av.FileExtensions}" Foreground="{DynamicResource MutedBrush}" Margin="0,12,0,2"/>
+                            <TextBox x:Name="CfgExtensions" TextWrapping="Wrap" Height="60" AcceptsReturn="True"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- 3.0.0.64: кнопка «Сохранить настройки антивируса» удалена — любые
+                         изменения полей применяются автоматически (с короткой паузой). -->
+                    <TextBlock Foreground="{DynamicResource MutedBrush}" Margin="0,14,0,0"
+                               FontSize="12" TextWrapping="Wrap"
+                               Text="{loc:Loc Av.AutoSaveHint}"/>
+                </StackPanel>
+            </ScrollViewer>
+        </Grid>
+    </DockPanel>
+</UserControl>

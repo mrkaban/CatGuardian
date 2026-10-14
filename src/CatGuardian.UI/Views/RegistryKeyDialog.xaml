@@ -1,0 +1,116 @@
+﻿<Window x:Class="CatGuardian.UI.Views.RegistryKeyDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:loc="clr-namespace:CatGuardian.UI.Localization"
+        Title="{loc:Loc Reg.DialogTitle}"
+        Width="700" Height="620" MinWidth="620" MinHeight="520"
+        WindowStartupLocation="CenterOwner" ResizeMode="CanResize"
+        ShowInTaskbar="False" Background="{DynamicResource BgBrush}">
+    <!-- Диалог выбора наблюдаемых веток реестра (3.0.0.6; 3.0.0.60: режим Continuous/OnDemand).
+         В режиме Continuous показываются только автозагрузочные группы и своя ветка с порогом
+         10 000 значений; в режиме OnDemand — только широкие ветки (Software/Hardware/System)
+         и свои ветки любого размера. Кнопки прижаты к низу через DockPanel.Dock=Bottom. -->
+    <DockPanel Margin="20">
+        <!-- Кнопки внизу: всегда видимы независимо от высоты содержимого. -->
+        <Border DockPanel.Dock="Bottom" Padding="0,14,0,0"
+                BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0"
+                Margin="0,14,0,0">
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button Content="{loc:Loc Reg.Apply}" Style="{StaticResource PrimaryButton}"
+                        Padding="20,9" IsDefault="True" Click="OnApply"/>
+                <Button Content="{loc:Loc Common.Cancel}" Padding="20,9" Margin="10,0,0,0"
+                        IsCancel="True"/>
+            </StackPanel>
+        </Border>
+
+        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+            <StackPanel Margin="0,0,6,0">
+                <TextBlock x:Name="DialogTitleText" Text="{loc:Loc Reg.Header}"
+                           Style="{StaticResource SectionTitleUpper}"/>
+
+                <!-- Секция: ПОСТОЯННОЕ наблюдение (режим Continuous) -->
+                <StackPanel x:Name="ContinuousSection">
+                    <Border Style="{StaticResource Card}" Padding="16" Margin="0,12,0,0">
+                        <StackPanel>
+                            <TextBlock Text="{loc:Loc Reg.ContinuousTitle}"
+                                       Foreground="{DynamicResource TextBrush}" FontWeight="Bold" FontSize="13"/>
+                            <TextBlock Text="{loc:Loc Reg.ContinuousHint}"
+                                       Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,2,0,8"/>
+                            <CheckBox x:Name="ChkHklmRun" Content="{loc:Loc Reg.ChkHklmRun}"
+                                      Foreground="{DynamicResource TextBrush}" FontSize="13" Margin="2,4" IsChecked="True"/>
+                            <CheckBox x:Name="ChkHkcuRun" Content="{loc:Loc Reg.ChkHkcuRun}"
+                                      Foreground="{DynamicResource TextBrush}" FontSize="13" Margin="2,4" IsChecked="True"/>
+                            <CheckBox x:Name="ChkWinlogon" Content="{loc:Loc Reg.ChkWinlogon}"
+                                      Foreground="{DynamicResource TextBrush}" FontSize="13" Margin="2,4" IsChecked="True"/>
+                            <CheckBox x:Name="ChkIfeo" Content="{loc:Loc Reg.ChkIfeo}"
+                                      Foreground="{DynamicResource TextBrush}" FontSize="13" Margin="2,4" IsChecked="True"/>
+                            <CheckBox x:Name="ChkServices" Content="{loc:Loc Reg.ChkServices}"
+                                      Foreground="{DynamicResource TextBrush}" FontSize="13" Margin="2,4"/>
+
+                            <TextBlock Text="{loc:Loc Reg.CustomTitle}" Style="{StaticResource SectionTitle}" Margin="0,12,0,2"/>
+                            <TextBlock Text="{loc:Loc Reg.CustomFormatHint}"
+                                       Foreground="{DynamicResource MutedBrush}" FontSize="12" TextWrapping="Wrap" Margin="0,0,0,6"/>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBox x:Name="RegCustomPath" VerticalAlignment="Center"
+                                         TextChanged="OnCustomPathChanged" ToolTip="{loc:Loc Reg.PathTooltip}"/>
+                                <Button x:Name="BtnAddCustom" Content="{loc:Loc Reg.BtnAdd}" Grid.Column="1"
+                                        Margin="10,0,0,0" IsEnabled="False" Click="OnAddCustom"/>
+                            </Grid>
+                            <TextBlock x:Name="CustomStatus" Foreground="{DynamicResource AmberBrush}" FontSize="12"
+                                       TextWrapping="Wrap" Margin="0,6,0,0"/>
+                            <ListBox x:Name="RegCustomList" Height="80" Margin="0,8,0,0"
+                                     ToolTip="{loc:Loc Reg.CustomListTooltip}"/>
+                            <Button Content="{loc:Loc Reg.BtnRemove}" Margin="0,6,0,0" HorizontalAlignment="Left"
+                                    Click="OnRemoveCustom"/>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+
+                <!-- Секция: ПО ЗАПРОСУ (режим OnDemand) -->
+                <StackPanel x:Name="OnDemandSection" Visibility="Collapsed">
+                    <Border Style="{StaticResource Card}" Padding="16" Margin="0,12,0,0">
+                        <StackPanel>
+                            <TextBlock Text="{loc:Loc Reg.OnDemandTitle}"
+                                       Foreground="{DynamicResource TextBrush}" FontWeight="Bold" FontSize="13"/>
+                            <TextBlock Text="{loc:Loc Reg.OnDemandHint}"
+                                       Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,2,0,8"/>
+                            <CheckBox x:Name="ChkSoftware" Content="{loc:Loc Reg.ChkSoftware}"
+                                      Foreground="{DynamicResource TextBrush}" FontSize="13" Margin="2,4"/>
+                            <CheckBox x:Name="ChkHardware" Content="{loc:Loc Reg.ChkHardware}"
+                                      Foreground="{DynamicResource TextBrush}" FontSize="13" Margin="2,4"/>
+                            <CheckBox x:Name="ChkSystem" Content="{loc:Loc Reg.ChkSystem}"
+                                      Foreground="{DynamicResource TextBrush}" FontSize="13" Margin="2,4"/>
+
+                            <TextBlock Text="{loc:Loc Reg.OnDemandCustomTitle}" Style="{StaticResource SectionTitle}" Margin="0,12,0,2"/>
+                            <TextBlock Text="{loc:Loc Reg.OnDemandCustomHint}"
+                                       Foreground="{DynamicResource MutedBrush}" FontSize="12" TextWrapping="Wrap" Margin="0,0,0,6"/>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBox x:Name="RegOnDemandPath" VerticalAlignment="Center"
+                                         TextChanged="OnOnDemandPathChanged" ToolTip="{loc:Loc Al2149}"/>
+                                <Button x:Name="BtnAddOnDemand" Content="{loc:Loc Reg.BtnAdd}" Grid.Column="1"
+                                        Margin="10,0,0,0" IsEnabled="False" Click="OnAddOnDemand"/>
+                            </Grid>
+                            <TextBlock x:Name="OnDemandStatus" Foreground="{DynamicResource AmberBrush}" FontSize="12"
+                                       TextWrapping="Wrap" Margin="0,6,0,0"/>
+                            <ListBox x:Name="RegOnDemandList" Height="80" Margin="0,8,0,0"
+                                     ToolTip="{loc:Loc Reg.OnDemandListTooltip}"/>
+                            <Button Content="{loc:Loc Reg.BtnRemove}" Margin="0,6,0,0" HorizontalAlignment="Left"
+                                    Click="OnRemoveOnDemand"/>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+
+                <TextBlock x:Name="SummaryText" Foreground="{DynamicResource MutedBrush}" FontSize="12"
+                           TextWrapping="Wrap" Margin="2,10,2,2"/>
+            </StackPanel>
+        </ScrollViewer>
+    </DockPanel>
+</Window>

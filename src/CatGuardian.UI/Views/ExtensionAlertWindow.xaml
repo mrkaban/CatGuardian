@@ -1,0 +1,201 @@
+﻿<Window x:Class="CatGuardian.UI.Views.ExtensionAlertWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:loc="clr-namespace:CatGuardian.UI.Localization"
+        Title="{loc:Loc Al1238}" Width="780" Height="640"
+        MinWidth="660" MinHeight="540"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="True"
+        ResizeMode="CanResize" FontFamily="Segoe UI" FontSize="13">
+    <!-- 3.0.0.38: окно алерта «Защита от расширений-шпионов». Построено по образцу
+         LolBinAlertWindow (3.0.0.36-шаблон): баннер вердикта, секции в карточках,
+         единый статус-блок, решающие кнопки одной строкой. Модуль НИЧЕГО не
+         блокирует — решение всегда за пользователем. -->
+    <Window.Resources>
+        <Style x:Key="FieldLabel" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{DynamicResource MutedBrush}"/>
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Margin" Value="0,10,0,3"/>
+        </Style>
+        <Style x:Key="InlineValue" TargetType="TextBox">
+            <Setter Property="IsReadOnly" Value="True"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+            <Setter Property="AcceptsReturn" Value="True"/>
+            <Setter Property="VerticalScrollBarVisibility" Value="Auto"/>
+            <Setter Property="MaxHeight" Value="80"/>
+            <Setter Property="MinHeight" Value="20"/>
+            <Setter Property="FontFamily" Value="Consolas"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Padding" Value="2,4"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
+            <Setter Property="ToolTip" Value="Значение можно выделить и скопировать (Ctrl+C)."/>
+        </Style>
+        <Style x:Key="HeaderUtilityButton" TargetType="Button">
+            <Setter Property="MinHeight" Value="30"/>
+            <Setter Property="Padding" Value="12,5"/>
+            <Setter Property="Margin" Value="0,0,8,0"/>
+            <Setter Property="FontSize" Value="12"/>
+        </Style>
+        <Style x:Key="DecisionButton" TargetType="Button">
+            <Setter Property="MinHeight" Value="36"/>
+            <Setter Property="Padding" Value="10,6"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="18">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Шапка: заголовок + утилиты справа сверху (3.0.0.36). -->
+        <Grid Grid.Row="0" Margin="0,0,0,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+
+            <StackPanel Grid.Column="0">
+                <TextBlock FontSize="18" FontWeight="Bold" TextWrapping="Wrap"
+                           Foreground="{DynamicResource TextBrush}">
+                    🧩 Cat Guardian — Защита от расширений-шпионов
+                </TextBlock>
+                <TextBlock x:Name="ThreatKindText" Foreground="{DynamicResource RedBrush}"
+                           FontWeight="SemiBold" Margin="0,4,0,0" TextWrapping="Wrap"/>
+            </StackPanel>
+
+            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top"
+                        Margin="16,0,0,0">
+                <Button Style="{StaticResource HeaderUtilityButton}" Content="{loc:Loc Al1239}"
+                        Margin="0,0,0,0" Click="OnCopyAll"
+                        ToolTip="{loc:Loc Al1240}"/>
+            </StackPanel>
+        </Grid>
+
+        <!-- Баннер вердикта (3.0.0.36). -->
+        <Border x:Name="VerdictBorder" Grid.Row="1" CornerRadius="4" Padding="12,8"
+                Background="#1AF44336" BorderThickness="1"
+                BorderBrush="{DynamicResource RedBrush}">
+            <StackPanel>
+                <TextBlock x:Name="VerdictTitle" FontSize="14" FontWeight="Bold"
+                           TextWrapping="Wrap" Foreground="{DynamicResource RedBrush}"/>
+                <TextBlock x:Name="VerdictMeaning" FontSize="12" TextWrapping="Wrap"
+                           Margin="0,2,0,0" Foreground="{DynamicResource TextBrush}"/>
+            </StackPanel>
+        </Border>
+
+        <!-- Детали -->
+        <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto" Margin="0,4,0,8">
+            <StackPanel>
+                <!-- ЧТО ОБНАРУЖЕНО -->
+                <TextBlock Style="{StaticResource FieldLabel}" Text="{loc:Loc Al1241}"/>
+                <Border Background="#14FFFFFF" CornerRadius="4" Padding="10,6" BorderThickness="1"
+                        BorderBrush="{DynamicResource BorderBrush}">
+                    <StackPanel>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="{loc:Loc Al1242}" Foreground="{DynamicResource MutedBrush}" FontSize="12"
+                                       VerticalAlignment="Center"/>
+                            <TextBox x:Name="NameText" Style="{StaticResource InlineValue}" Margin="10,0,0,0"/>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+                            <TextBlock Text="{loc:Loc Al1243}" Foreground="{DynamicResource MutedBrush}" FontSize="12"
+                                       VerticalAlignment="Center"/>
+                            <TextBox x:Name="VersionText" Style="{StaticResource InlineValue}" Margin="10,0,0,0"/>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+                            <TextBlock Text="ID:" Foreground="{DynamicResource MutedBrush}" FontSize="12"
+                                       VerticalAlignment="Center"/>
+                            <TextBox x:Name="IdText" Style="{StaticResource InlineValue}" Margin="10,0,0,0"/>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+                            <TextBlock Text="{loc:Loc Al1244}" Foreground="{DynamicResource MutedBrush}" FontSize="12"
+                                       VerticalAlignment="Center"/>
+                            <TextBox x:Name="BrowserText" Style="{StaticResource InlineValue}" Margin="10,0,0,0"/>
+                        </StackPanel>
+                        <StackPanel x:Name="UpdateUrlRow" Orientation="Horizontal" Margin="0,4,0,0">
+                            <TextBlock Text="update_url:" Foreground="{DynamicResource MutedBrush}" FontSize="12"
+                                       VerticalAlignment="Top" Margin="0,3,0,0"/>
+                            <TextBox x:Name="UpdateUrlText" Style="{StaticResource InlineValue}" Margin="10,0,0,0"/>
+                        </StackPanel>
+                        <StackPanel x:Name="UnpackedRow" Orientation="Horizontal" Margin="0,4,0,0"
+                                    Visibility="Collapsed">
+                            <TextBlock Text="{loc:Loc Al1245}" Foreground="{DynamicResource MutedBrush}" FontSize="12"
+                                       VerticalAlignment="Center"/>
+                            <TextBlock x:Name="UnpackedText" FontWeight="SemiBold" Margin="10,0,0,0"
+                                       Foreground="{DynamicResource AmberBrush}"/>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- ГДЕ НАЙДЕНО -->
+                <TextBlock Style="{StaticResource FieldLabel}" Text="{loc:Loc Al1246}"/>
+                <Border Background="#14FFFFFF" CornerRadius="4" Padding="10,6" BorderThickness="1"
+                        BorderBrush="{DynamicResource BorderBrush}">
+                    <TextBox x:Name="PathText" Style="{StaticResource InlineValue}"/>
+                </Border>
+
+                <!-- ЧЕМ ОПАСНО -->
+                <TextBlock Style="{StaticResource FieldLabel}" Text="{loc:Loc Al1247}"/>
+                <Border Background="#14FFFFFF" CornerRadius="4" Padding="10,6" BorderThickness="1"
+                        BorderBrush="{DynamicResource BorderBrush}">
+                    <StackPanel>
+                        <TextBox x:Name="ReasonsText" Style="{StaticResource InlineValue}"/>
+                        <StackPanel x:Name="PermsRow" Orientation="Horizontal" Margin="0,4,0,0"
+                                    Visibility="Collapsed">
+                            <TextBlock Text="{loc:Loc Al1248}" Foreground="{DynamicResource MutedBrush}" FontSize="12"
+                                       VerticalAlignment="Top" Margin="0,3,0,0"/>
+                            <TextBox x:Name="PermissionsText" Style="{StaticResource InlineValue}" Margin="10,0,0,0"/>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+                            <TextBlock Text="{loc:Loc Al1249}" Foreground="{DynamicResource MutedBrush}" FontSize="12"
+                                       VerticalAlignment="Center"/>
+                            <TextBlock x:Name="RiskScoreText" FontWeight="SemiBold" Margin="10,0,0,0"
+                                       Foreground="{DynamicResource TextBrush}"/>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- АНАЛИЗ -->
+                <TextBlock Style="{StaticResource FieldLabel}" Text="{loc:Loc Al1250}"/>
+                <Border Background="#14FFFFFF" CornerRadius="4" Padding="10,6" BorderThickness="1"
+                        BorderBrush="{DynamicResource BorderBrush}">
+                    <StackPanel>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="{loc:Loc Al1251}" Foreground="{DynamicResource MutedBrush}" FontSize="12"
+                                       VerticalAlignment="Center"/>
+                            <TextBox x:Name="TimeText" Style="{StaticResource InlineValue}" Margin="10,0,0,0"/>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- Статус + действия -->
+        <StackPanel Grid.Row="3">
+            <TextBlock x:Name="StatusText" TextWrapping="Wrap" FontWeight="SemiBold" Margin="0,0,0,8"
+                       Foreground="{DynamicResource AmberBrush}"/>
+            <TextBlock x:Name="ActionStatus" Visibility="Collapsed" TextWrapping="Wrap" Margin="0,0,0,8"
+                       FontSize="12"/>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button Style="{StaticResource DecisionButton}" Content="{loc:Loc Al1252}"
+                        Margin="0,0,6,0" Click="OnOpenFolder"
+                        ToolTip="{loc:Loc Al1253}"/>
+                <Button x:Name="BtnDisable" Style="{StaticResource DecisionButton}" Content="{loc:Loc Al1254}"
+                        Margin="0,0,6,0" Click="OnDisable"
+                        ToolTip="{loc:Loc Al1255}"/>
+                <Button x:Name="BtnRemove" Style="{StaticResource DecisionButton}" Content="{loc:Loc Al1256}"
+                        Margin="0,0,6,0" Click="OnRemove"
+                        ToolTip="{loc:Loc Al1257}"/>
+                <Button x:Name="BtnTrust" Style="{StaticResource DecisionButton}" Content="{loc:Loc Al1258}"
+                        Margin="0,0,6,0" Click="OnTrust"
+                        ToolTip="{loc:Loc Al1259}"/>
+                <Button Style="{StaticResource DecisionButton}" Content="{loc:Loc Al1260}" Click="OnClose"/>
+            </StackPanel>
+        </StackPanel>
+    </Grid>
+</Window>

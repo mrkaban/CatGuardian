@@ -1,0 +1,86 @@
+<UserControl x:Class="CatGuardian.UI.Views.AboutView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:loc="clr-namespace:CatGuardian.UI.Localization">
+    <!-- 3.0.0.92: все тексты страницы «О программе» локализованы (About.*). -->
+    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+        <StackPanel MaxWidth="760" HorizontalAlignment="Left" Margin="8,0,8,8">
+            <TextBlock Style="{StaticResource PageTitle}" Text="{loc:Loc About.PageTitle}"/>
+            <TextBlock Foreground="{DynamicResource MutedBrush}" Margin="0,4,0,18"
+                       Text="{loc:Loc About.PageSubtitle}"/>
+
+            <!-- Общая информация -->
+            <Border Style="{StaticResource Card}">
+                <StackPanel>
+                    <TextBlock Style="{StaticResource SectionTitle}" Text="{loc:Loc About.Section}"/>
+                    <!-- Версия заполняется из метаданных сборки (Directory.Build.props). -->
+                    <TextBlock x:Name="VersionLabel" Text="…" Margin="0,0,0,8"/>
+                    <TextBlock TextWrapping="Wrap" LineHeight="22" Margin="0,0,0,8"
+                               Text="{loc:Loc About.Description}"/>
+                    <TextBlock Text="{loc:Loc About.Copyright}" Margin="0,4,0,0"/>
+                    <TextBlock Margin="0,4,0,0">
+                        <Run Text="{loc:Loc About.SiteLabel}"/>
+                        <Hyperlink NavigateUri="https://alekseycheremnykh.ru/post/cat-guardian/"
+                                   RequestNavigate="OnNavigateLink">
+                            alekseycheremnykh.ru/post/cat-guardian/
+                        </Hyperlink>
+                    </TextBlock>
+                </StackPanel>
+            </Border>
+
+            <!-- PS автора — над лицензированием (3.0.0.6) -->
+            <Border Style="{StaticResource Card}" Margin="0,14,0,0" Background="{DynamicResource AccentSoftBrush}">
+                <TextBlock TextWrapping="Wrap" LineHeight="22" FontSize="13"
+                           Foreground="{DynamicResource TextBrush}"
+                           Text="{loc:Loc About.PsNote}"/>
+            </Border>
+
+            <!-- Лицензирование и исходный код -->
+            <Border Style="{StaticResource Card}" Margin="0,14,0,0">
+                <StackPanel>
+                    <TextBlock Style="{StaticResource SectionTitle}" Text="{loc:Loc About.SectionLicense}"/>
+                    <TextBlock TextWrapping="Wrap" LineHeight="22" Margin="0,10,0,0">
+                        <Run Text="{loc:Loc About.LicenseText}"/>
+                        <Hyperlink NavigateUri="https://github.com/mrkaban/CatGuardian/"
+                                   RequestNavigate="OnNavigateLink">
+                            https://github.com/mrkaban/CatGuardian/
+                        </Hyperlink>
+                    </TextBlock>
+                    <TextBlock Text="{loc:Loc About.LicenseFileLabel}" Foreground="{DynamicResource MutedBrush}" Margin="0,4,0,0"/>
+                    <TextBlock x:Name="LicenseGplPath" FontFamily="Consolas" FontSize="12"
+                               Foreground="{DynamicResource AccentBrush}" TextWrapping="Wrap"/>
+
+                    <TextBlock TextWrapping="Wrap" LineHeight="22" Margin="0,12,0,0"
+                               Text="{loc:Loc About.ClamAvText}"/>
+                    <TextBlock TextWrapping="Wrap" LineHeight="22" Margin="0,4,0,0">
+                        <Run Text="{loc:Loc About.ClamAvSourceText}"/>
+                        <Hyperlink NavigateUri="https://github.com/Cisco-Talos/clamav"
+                                   RequestNavigate="OnNavigateLink">
+                            https://github.com/Cisco-Talos/clamav
+                        </Hyperlink>
+                    </TextBlock>
+                    <TextBlock Text="{loc:Loc About.LicenseFileLabel}" Foreground="{DynamicResource MutedBrush}" Margin="0,4,0,0"/>
+                    <TextBlock x:Name="ClamavLicensePath" FontFamily="Consolas" FontSize="12"
+                               Foreground="{DynamicResource AccentBrush}" TextWrapping="Wrap"/>
+                </StackPanel>
+            </Border>
+
+            <!-- Интеллектуальная собственность (бренд и дизайн) -->
+            <Border Style="{StaticResource Card}" Margin="0,14,0,0">
+                <StackPanel>
+                    <TextBlock Style="{StaticResource SectionTitle}" Text="{loc:Loc About.SectionIp}"/>
+                    <TextBlock TextWrapping="Wrap" LineHeight="22" Margin="0,10,0,0"
+                               Text="{loc:Loc About.IpText}"/>
+                    <TextBlock TextWrapping="Wrap" LineHeight="22" Margin="0,8,0,0"
+                               Text="{loc:Loc About.IpImagesText}"/>
+                    <TextBlock Text="{loc:Loc About.IpImagesLabel}" Foreground="{DynamicResource MutedBrush}" Margin="0,4,0,0"/>
+                    <TextBlock x:Name="ArtLicensePath" FontFamily="Consolas" FontSize="12"
+                               Foreground="{DynamicResource AccentBrush}" TextWrapping="Wrap"/>
+                </StackPanel>
+            </Border>
+
+            <TextBlock Foreground="{DynamicResource MutedBrush}" Margin="0,16,0,0" TextWrapping="Wrap"
+                       Text="{loc:Loc About.TechNote}"/>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

@@ -1,0 +1,217 @@
+﻿<Window x:Class="CatGuardian.UI.Views.ShortcutAlertWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:loc="clr-namespace:CatGuardian.UI.Localization"
+        Title="{loc:Loc Al1865}" Width="780" Height="640"
+        MinWidth="660" MinHeight="540"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="True"
+        ResizeMode="CanResize" FontFamily="Segoe UI" FontSize="13">
+    <!-- 3.0.0.36: шаблон алерт-окна семейства (см. EtwAlertWindow-эталон):
+         баннер вердикта, секции в карточках, статус действия,
+         решающие кнопки одной строкой, утилиты в шапке. -->
+    <Window.Resources>
+        <Style x:Key="FieldLabel" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{DynamicResource MutedBrush}"/>
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Margin" Value="0,10,0,3"/>
+        </Style>
+        <Style x:Key="InlineValue" TargetType="TextBox">
+            <Setter Property="IsReadOnly" Value="True"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+            <Setter Property="AcceptsReturn" Value="True"/>
+            <Setter Property="VerticalScrollBarVisibility" Value="Auto"/>
+            <Setter Property="MaxHeight" Value="70"/>
+            <Setter Property="MinHeight" Value="20"/>
+            <Setter Property="FontFamily" Value="Consolas"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Padding" Value="2,4"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
+            <Setter Property="ToolTip" Value="Значение можно выделить и скопировать (Ctrl+C). Полный путь доступен во всплывающей подсказке."/>
+        </Style>
+        <Style x:Key="HeaderUtilityButton" TargetType="Button">
+            <Setter Property="MinHeight" Value="30"/>
+            <Setter Property="Padding" Value="12,5"/>
+            <Setter Property="Margin" Value="0,0,8,0"/>
+            <Setter Property="FontSize" Value="12"/>
+        </Style>
+        <Style x:Key="DecisionButton" TargetType="Button">
+            <Setter Property="MinHeight" Value="40"/>
+            <Setter Property="Padding" Value="16,9"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="18">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Шапка: заголовок + утилиты справа сверху (3.0.0.36). -->
+        <Grid Grid.Row="0" Margin="0,0,0,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+
+            <StackPanel Grid.Column="0">
+                <TextBlock FontSize="18" FontWeight="Bold" TextWrapping="Wrap"
+                           Foreground="{DynamicResource TextBrush}">
+                    🛡️ Cat Guardian — подмена цели ярлыка
+                </TextBlock>
+                <TextBlock x:Name="ShortcutStatus" Foreground="{DynamicResource RedBrush}"
+                           FontWeight="SemiBold" Margin="0,4,0,0" TextWrapping="Wrap"
+                           Text="{loc:Loc Al1866}"/>
+            </StackPanel>
+
+            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top"
+                        Margin="16,0,0,0">
+                <Button x:Name="BtnShortcutOpenFolder" Style="{StaticResource HeaderUtilityButton}"
+                        Content="{loc:Loc Al1867}" Margin="0,0,0,0" Click="OnShortcutOpenFolder"
+                        ToolTip="{loc:Loc Al1868}"/>
+            </StackPanel>
+        </Grid>
+
+        <!-- Баннер вердикта (3.0.0.36). -->
+        <Border Grid.Row="1" CornerRadius="4" Padding="12,8"
+                Background="#1AF44336" BorderThickness="1"
+                BorderBrush="{DynamicResource RedBrush}">
+            <StackPanel>
+                <TextBlock FontSize="14" FontWeight="Bold" TextWrapping="Wrap"
+                           Foreground="{DynamicResource RedBrush}">
+                    ⚠️ ПОДОЗРИТЕЛЬНО — ярлык переуказан на другую цель
+                </TextBlock>
+                <TextBlock FontSize="12" TextWrapping="Wrap" Margin="0,2,0,0"
+                           Foreground="{DynamicResource TextBrush}">
+                    Цель или аргументы ярлыка изменились: теперь он запускает другой файл. Так вредоносное ПО маскируется под легитимные программы — ярлык может запустить загрузчик или вредоносный код вместо ожидаемого приложения.
+                </TextBlock>
+            </StackPanel>
+        </Border>
+
+        <!-- Детали -->
+        <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto" Margin="0,4,0,8">
+            <StackPanel>
+                <!-- ЯРЛЫК -->
+                <TextBlock Style="{StaticResource FieldLabel}" Text="{loc:Loc Al1869}"/>
+                <Border Background="#14FFFFFF" CornerRadius="4" Padding="10,6" BorderThickness="1"
+                        BorderBrush="{DynamicResource BorderBrush}">
+                    <StackPanel>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="{loc:Loc Al1870}" Foreground="{DynamicResource MutedBrush}" FontSize="12"
+                                       VerticalAlignment="Center"/>
+                            <TextBox x:Name="ShortcutLinkPath" Style="{StaticResource InlineValue}"
+                                     Margin="10,0,0,0" VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+                            <TextBlock Text="{loc:Loc Al1871}" Foreground="{DynamicResource MutedBrush}" FontSize="12"
+                                       VerticalAlignment="Center"/>
+                            <TextBox x:Name="ShortcutZone" Style="{StaticResource InlineValue}"
+                                     Margin="10,0,0,0" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- ЦЕЛЬ -->
+                <TextBlock Style="{StaticResource FieldLabel}" Text="{loc:Loc Al1872}"/>
+                <Border Background="#14FFFFFF" CornerRadius="4" Padding="10,6" BorderThickness="1"
+                        BorderBrush="{DynamicResource BorderBrush}">
+                    <StackPanel>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="{loc:Loc Al1873}" Foreground="{DynamicResource MutedBrush}" FontSize="12"
+                                       VerticalAlignment="Center"/>
+                            <TextBox x:Name="ShortcutTargetWas" Style="{StaticResource InlineValue}"
+                                     Margin="10,0,0,0" VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+                            <TextBlock Text="{loc:Loc Al1874}" Foreground="{DynamicResource MutedBrush}" FontSize="12"
+                                       VerticalAlignment="Center"/>
+                            <TextBox x:Name="ShortcutTargetNow" Style="{StaticResource InlineValue}"
+                                     Margin="10,0,0,0" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- АРГУМЕНТЫ -->
+                <TextBlock Style="{StaticResource FieldLabel}" Text="{loc:Loc Al1875}"/>
+                <Border Background="#14FFFFFF" CornerRadius="4" Padding="10,6" BorderThickness="1"
+                        BorderBrush="{DynamicResource BorderBrush}">
+                    <StackPanel>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="{loc:Loc Al1873}" Foreground="{DynamicResource MutedBrush}" FontSize="12"
+                                       VerticalAlignment="Center"/>
+                            <TextBox x:Name="ShortcutArgsWas" Style="{StaticResource InlineValue}"
+                                     Margin="10,0,0,0" VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+                            <TextBlock Text="{loc:Loc Al1874}" Foreground="{DynamicResource MutedBrush}" FontSize="12"
+                                       VerticalAlignment="Center"/>
+                            <TextBox x:Name="ShortcutArgsNow" Style="{StaticResource InlineValue}"
+                                     Margin="10,0,0,0" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- АНАЛИЗ -->
+                <TextBlock Style="{StaticResource FieldLabel}" Text="{loc:Loc Al1878}"/>
+                <Border Background="#14FFFFFF" CornerRadius="4" Padding="10,6" BorderThickness="1"
+                        BorderBrush="{DynamicResource BorderBrush}">
+                    <StackPanel>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="{loc:Loc Al1879}" Foreground="{DynamicResource MutedBrush}" FontSize="12"
+                                       VerticalAlignment="Center"/>
+                            <TextBox x:Name="ShortcutSignature" Style="{StaticResource InlineValue}"
+                                     Margin="10,0,0,0" VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+                            <TextBlock Text="{loc:Loc Al1880}" Foreground="{DynamicResource MutedBrush}" FontSize="12"
+                                       VerticalAlignment="Center"/>
+                            <TextBox x:Name="ShortcutClam" Style="{StaticResource InlineValue}"
+                                     Margin="10,0,0,0" VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+                            <TextBlock Text="IOC:" Foreground="{DynamicResource MutedBrush}" FontSize="12"
+                                       VerticalAlignment="Center"/>
+                            <TextBox x:Name="ShortcutIoc" Style="{StaticResource InlineValue}"
+                                     Margin="10,0,0,0" VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <StackPanel x:Name="ShortcutRiskRow" Orientation="Horizontal" Margin="0,4,0,0">
+                            <TextBlock Text="{loc:Loc Al1881}" Foreground="{DynamicResource MutedBrush}" FontSize="12"
+                                       VerticalAlignment="Center"/>
+                            <TextBox x:Name="ShortcutRisk" Style="{StaticResource InlineValue}"
+                                     Margin="10,0,0,0" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- Статус действия + решающие кнопки одной строкой (3.0.0.36). -->
+        <Grid Grid.Row="3">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <TextBlock x:Name="ActionStatus" Grid.Row="0" Foreground="{DynamicResource MutedBrush}"
+                       Margin="0,0,0,8" TextWrapping="Wrap"
+                       MaxHeight="44" TextTrimming="CharacterEllipsis"
+                       ToolTip="{loc:Loc Al1882}"/>
+
+            <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,0,0,0">
+                <Button x:Name="BtnShortcutTrust" Style="{StaticResource DecisionButton}"
+                        Content="{loc:Loc Al1883}" Margin="0,0,8,0" Click="OnShortcutTrust"
+                        ToolTip="{loc:Loc Al1884}"/>
+                <Button x:Name="BtnShortcutDelete" Style="{StaticResource DecisionButton}"
+                        Content="{loc:Loc Al1885}" Margin="0,0,8,0" Click="OnShortcutDelete"
+                        ToolTip="{loc:Loc Al1886}"/>
+                <Button Content="{loc:Loc Al1887}" IsCancel="True" Style="{StaticResource DecisionButton}"
+                        Margin="0,0,0,0" Click="OnShortcutClose"/>
+            </StackPanel>
+        </Grid>
+    </Grid>
+</Window>

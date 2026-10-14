@@ -1,0 +1,162 @@
+﻿<Window x:Class="CatGuardian.UI.Views.PrivacyShieldAlertWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:loc="clr-namespace:CatGuardian.UI.Localization"
+        Title="{loc:Loc Al1646}" Width="760" Height="620"
+        MinWidth="660" MinHeight="540"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="True"
+        ResizeMode="CanResize" FontFamily="Segoe UI" FontSize="13">
+    <!-- 3.0.0.66 (финальная спецификация, per-app allowlist): интерактивный алерт Privacy
+         Shield, строго по образцу семейства (AntiStealerAlertWindow): шапка с утилитами,
+         баннер вердикта, секции деталей, единый статус-блок, решающие кнопки одной строкой:
+         UseDetected (запрос приложения) и Tamper с ИЗВЕСТНЫМ приложением: ровно 4 кнопки
+         «Доверять» / «Разрешить разово» / «Запретить» / «Закрыть».
+         Tamper с НЕИЗВЕСТНЫМ приложением: только «Закрыть». -->
+    <Window.Resources>
+        <Style x:Key="FieldLabel" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{DynamicResource MutedBrush}"/>
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Margin" Value="0,10,0,3"/>
+        </Style>
+        <Style x:Key="InlineValue" TargetType="TextBox">
+            <Setter Property="IsReadOnly" Value="True"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+            <Setter Property="AcceptsReturn" Value="True"/>
+            <Setter Property="VerticalScrollBarVisibility" Value="Auto"/>
+            <Setter Property="MaxHeight" Value="80"/>
+            <Setter Property="MinHeight" Value="20"/>
+            <Setter Property="FontFamily" Value="Consolas"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Padding" Value="2,4"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
+            <Setter Property="ToolTip" Value="Значение можно выделить и скопировать (Ctrl+C)."/>
+        </Style>
+        <Style x:Key="HeaderUtilityButton" TargetType="Button">
+            <Setter Property="MinHeight" Value="30"/>
+            <Setter Property="Padding" Value="12,5"/>
+            <Setter Property="Margin" Value="0,0,8,0"/>
+            <Setter Property="FontSize" Value="12"/>
+        </Style>
+        <Style x:Key="DecisionButton" TargetType="Button">
+            <Setter Property="MinHeight" Value="40"/>
+            <Setter Property="Padding" Value="16,9"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="18">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Шапка: заголовок + утилиты справа сверху (как в семействе). -->
+        <Grid Grid.Row="0" Margin="0,0,0,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+
+            <StackPanel Grid.Column="0">
+                <TextBlock FontSize="18" FontWeight="Bold" TextWrapping="Wrap"
+                           Foreground="{DynamicResource TextBrush}">
+                    🔒 Cat Guardian — защита веб-камеры и микрофона
+                </TextBlock>
+                <TextBlock x:Name="ThreatKindText" Foreground="{DynamicResource RedBrush}"
+                           FontWeight="SemiBold" Margin="0,4,0,0" TextWrapping="Wrap"/>
+            </StackPanel>
+
+            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top"
+                        Margin="16,0,0,0">
+                <Button x:Name="BtnOpenFolder" Style="{StaticResource HeaderUtilityButton}"
+                        Content="{loc:Loc Al1647}" Click="OnOpenFolder"
+                        ToolTip="{loc:Loc Al1648}"/>
+                <Button x:Name="BtnCopyAll" Style="{StaticResource HeaderUtilityButton}"
+                        Content="{loc:Loc Al1649}" Margin="0,0,0,0" Click="OnCopyAll"
+                        ToolTip="{loc:Loc Al1650}"/>
+            </StackPanel>
+        </Grid>
+
+        <!-- Баннер вердикта (как в семействе). -->
+        <Border x:Name="VerdictBorder" Grid.Row="1" CornerRadius="4" Padding="12,8"
+                Background="#1AF44336" BorderThickness="1"
+                BorderBrush="{DynamicResource RedBrush}">
+            <StackPanel>
+                <TextBlock x:Name="VerdictTitle" FontSize="14" FontWeight="Bold"
+                           TextWrapping="Wrap" Foreground="{DynamicResource RedBrush}"/>
+                <TextBlock x:Name="VerdictMeaning" FontSize="12" TextWrapping="Wrap"
+                           Margin="0,2,0,0" Foreground="{DynamicResource TextBrush}"/>
+            </StackPanel>
+        </Border>
+
+        <!-- Детали -->
+        <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto" Margin="0,4,0,8">
+            <StackPanel>
+                <TextBlock Style="{StaticResource FieldLabel}" Text="{loc:Loc Al1651}"/>
+                <Border Background="#14FFFFFF" CornerRadius="4" Padding="10,6" BorderThickness="1"
+                        BorderBrush="{DynamicResource BorderBrush}">
+                    <TextBox x:Name="AppText" Style="{StaticResource InlineValue}"/>
+                </Border>
+
+                <TextBlock Style="{StaticResource FieldLabel}" Text="{loc:Loc Al1652}"/>
+                <Border Background="#14FFFFFF" CornerRadius="4" Padding="10,6" BorderThickness="1"
+                        BorderBrush="{DynamicResource BorderBrush}">
+                    <TextBox x:Name="DeviceText" Style="{StaticResource InlineValue}"/>
+                </Border>
+
+                <TextBlock Style="{StaticResource FieldLabel}" Text="{loc:Loc Al1653}"/>
+                <Border Background="#14FFFFFF" CornerRadius="4" Padding="10,6" BorderThickness="1"
+                        BorderBrush="{DynamicResource BorderBrush}">
+                    <TextBox x:Name="TimeText" Style="{StaticResource InlineValue}"/>
+                </Border>
+
+                <TextBlock Style="{StaticResource FieldLabel}" Text="{loc:Loc Al1654}"/>
+                <Border Background="#14FFFFFF" CornerRadius="4" Padding="10,6" BorderThickness="1"
+                        BorderBrush="{DynamicResource BorderBrush}">
+                    <TextBox x:Name="DetailsText" Style="{StaticResource InlineValue}" MaxHeight="120"/>
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- Единый статус-блок + решающие кнопки одной строкой (как в семействе). -->
+        <Grid Grid.Row="3">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <Border x:Name="StatusBlock" Grid.Row="0" Background="#14FFFFFF" CornerRadius="4"
+                    Padding="10,6" BorderThickness="1" BorderBrush="{DynamicResource BorderBrush}">
+                <StackPanel>
+                    <TextBlock x:Name="StatusText" FontWeight="SemiBold" FontSize="13" TextWrapping="Wrap"
+                               Foreground="{DynamicResource AmberBrush}"/>
+                    <TextBlock x:Name="ActionStatus" Foreground="{DynamicResource MutedBrush}" FontSize="12"
+                               TextWrapping="Wrap" Margin="0,4,0,0" Visibility="Collapsed"/>
+                </StackPanel>
+            </Border>
+
+            <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
+                <Button x:Name="BtnTrust" Style="{StaticResource DecisionButton}"
+                        Content="{loc:Loc Al1655}" Margin="0,0,8,0" FontWeight="Bold"
+                        Background="#2E7D32" Foreground="White" BorderThickness="0" Click="OnTrust"
+                        ToolTip="{loc:Loc Al1656}"/>
+                <Button x:Name="BtnAllowOnce" Style="{StaticResource DecisionButton}"
+                        Content="{loc:Loc Al1657}" Margin="0,0,8,0" FontWeight="Bold"
+                        Background="#FFA000" Foreground="White" BorderThickness="0" Click="OnAllowOnce"
+                        ToolTip="{loc:Loc Al1658}"/>
+                <Button x:Name="BtnDeny" Style="{StaticResource DecisionButton}"
+                        Content="{loc:Loc Al1659}" Margin="0,0,8,0" FontWeight="Bold"
+                        Background="#D32F2F" Foreground="White" BorderThickness="0" Click="OnDeny"
+                        ToolTip="{loc:Loc Al1660}"/>
+                <Button x:Name="BtnClose" Style="{StaticResource DecisionButton}"
+                        Content="{loc:Loc Al1661}" IsCancel="True" Margin="0,0,0,0" Click="OnClose"
+                        ToolTip="{loc:Loc Al1662}"/>
+            </StackPanel>
+        </Grid>
+    </Grid>
+</Window>
