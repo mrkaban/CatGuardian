@@ -835,7 +835,7 @@ public partial class AntivirusView : UserControl
         try
         {
             var on = _config.UpdateDatabaseAutomatically;
-            var interval = Math.Max(1, _config.AutoUpdateIntervalHours);
+            var interval = Math.Max(12, _config.AutoUpdateIntervalHours);
             var lastCheck = LastUpdateCheckStore.TryReadDateTime();
             var lastText = lastCheck is null
                 ? Tr.T("Av.NeverRan")
@@ -1657,7 +1657,8 @@ public partial class AntivirusView : UserControl
             if (CfgUpdateHours.SelectedItem is System.Windows.Controls.ComboBoxItem cbi
                 && int.TryParse(cbi.Tag?.ToString(), out var hours))
             {
-                _config.AutoUpdateIntervalHours = Math.Clamp(hours, 1, 168);
+                // 3.0.1.6 (требование A2): автообновление НЕ чаще 2 раз в день.
+                _config.AutoUpdateIntervalHours = Math.Clamp(hours, 12, 168);
             }
             _config.MonitorSystemChanges = CfgMonitorSystem.IsChecked == true;
             _config.DetectNewDrives = CfgDetectDrives.IsChecked == true;
