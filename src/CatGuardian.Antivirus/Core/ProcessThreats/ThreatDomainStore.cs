@@ -45,6 +45,11 @@ public sealed class ThreatDomainStore
     /// <summary>TTL reverse-DNS кэша.</summary>
     public static readonly TimeSpan ReverseDnsTtl = TimeSpan.FromHours(1);
 
+    /// <summary>D7 (3.0.1.6): TTL кэша списков пулов — авто-обновление не перекачивает
+    /// списки чаще этого интервала (защита от частых вызовов). Ручное обновление из
+    /// панели передаёт force:true и всегда качает заново.</summary>
+    public static readonly TimeSpan ListsTtl = TimeSpan.FromHours(6);
+
     /// <summary>Путь кэша скачанных списков (чтобы работать без сети после первого обновления).
     /// 3.0.0.68: имя каталога «threat_lists» (нейтральное; «miner_lists» убрано из сборки —
     /// ложные детекты антивирусов). Старый путь читается как резервный в <see cref="TryLoadCacheInto"/>.</summary>
@@ -94,7 +99,9 @@ public sealed class ThreatDomainStore
         {
             AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate,
         };
-        var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(20) };
+        // D7 (3.0.1.6): таймаут 20 → 10 с. Списки скачиваются параллельно (Task.WhenAll),
+        // поэтому худший случай = 10 с, а не 2×20 с (реальный инцидент: 38 с).
+        var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(10) };
         // Версия берётся из метаданных сборки (Directory.Build.props), а не задана константой в коде.
         var version = typeof(ThreatDomainStore).Assembly.GetName().Version?.ToString(4) ?? "0.0.0.0";
         client.DefaultRequestHeaders.UserAgent.ParseAdd($"CatGuardian/{version}");
@@ -436,15 +443,40 @@ public sealed class ThreatDomainStore
     /// не трогая текущий набор доменов.
     /// </summary>
     public async Task<ThreatListsUpdateResult> UpdateFromRemoteAsync(
-        JsonConfiguration config, CancellationToken ct = default)
+        JsonConfiguration config, CancellationToken ct = default, bool force = false)
     {
+        // D7 (3.0.1.6): TTL-кэш — авто-обновление не перекачивает списки, если они
+        // обновлялись менее ListsTtl назад. Ручное обновление из панели (force:true)
+        // всегда качает заново.
+        if (!force)
+        {
+            DateTime? last;
+            int lastCount;
+            lock (_sync) { last = _lastDownloadUtc; lastCount = _lastDownloadDomains; }
+            if (last is not null && DateTime.UtcNow - last.Value < ListsTtl)
+            {
+                return new ThreatListsUpdateResult
+                {
+                    Ok = true,
+                    Domains = lastCount,
+                    AtUtc = last.Value,
+                    Error = null,
+                };
+            }
+        }
+
         var errors = new List<string>();
         var downloaded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         try
         {
-            // Списки скачиваются независимо: недоступность одного не отменяет
-            // применение успешно полученного второго (частичный успех).
-            var primary = await TryDownloadAsync(ThreatPatternData.PrimaryListUrl, ct).ConfigureAwait(false);
+            // D7 (3.0.1.6): оба списка скачиваются ПАРАЛЛЕЛЬНО (Task.WhenAll) — раньше
+            // последовательно, худший случай 2×20 с = 40 с (реальный инцидент: 38 с).
+            // Списки независимы: недоступность одного не отменяет применение второго.
+            var downloads = await Task.WhenAll(
+                TryDownloadAsync(ThreatPatternData.PrimaryListUrl, ct),
+                TryDownloadAsync(ThreatPatternData.SecondaryListUrl, ct)).ConfigureAwait(false);
+            var primary = downloads[0];
+            var secondary = downloads[1];
             if (primary.Ok)
             {
                 foreach (var d in primary.Domains) downloaded.Add(d);
@@ -454,7 +486,6 @@ public sealed class ThreatDomainStore
                 errors.Add("PrimaryList: " + primary.Error);
             }
 
-            var secondary = await TryDownloadAsync(ThreatPatternData.SecondaryListUrl, ct).ConfigureAwait(false);
             if (secondary.Ok)
             {
                 foreach (var d in secondary.Domains) downloaded.Add(d);
