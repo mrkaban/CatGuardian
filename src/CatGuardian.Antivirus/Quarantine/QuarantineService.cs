@@ -40,6 +40,15 @@ public sealed class QuarantineService
             throw new FileNotFoundException("Файл для карантина не найден.", sourcePath);
         }
 
+        // P15: сброс атрибутов (ReadOnly и др.) — иначе карантин/удаление падают с
+        // Access denied (ВМ 19.10: q8gj4sm2u.exe с ReadOnly «НЕ УДАЛОСЬ ПЕРЕМЕСТИТЬ»,
+        // оригинал оставался на рабочем столе).
+        try
+        {
+            File.SetAttributes(sourcePath, FileAttributes.Normal);
+        }
+        catch { /* атрибуты некритичны — карантин попробует дальше */ }
+
         var id = Guid.NewGuid().ToString("N");
         var fileName = Path.GetFileName(sourcePath);
         var quarantinedFile = Path.Combine(_quarantineDirectory, $"{id}_{Sanitize(fileName)}.cgq");
@@ -175,6 +184,27 @@ public sealed class QuarantineService
             $"Удалено из карантина: {entry.OriginalPath}");
 
         return true;
+    }
+
+    /// <summary>3.0.1.6 (требование 3.3): читает РАСШИФРОВАННОЕ содержимое карантинного файла
+    /// (.cgq) — для вычисления SHA-256 при импорте хэшей карантина в hash-индекс на старте.
+    /// null — файл отсутствует или не удалось расшифровать (ключ другого пользователя/повреждён).</summary>
+    public byte[]? TryReadPlainBytes(QuarantineEntry entry)
+    {
+        try
+        {
+            if (entry is null || string.IsNullOrWhiteSpace(entry.QuarantinePath) || !File.Exists(entry.QuarantinePath))
+            {
+                return null;
+            }
+
+            var encrypted = File.ReadAllBytes(entry.QuarantinePath);
+            return QuarantineCrypto.Decrypt(encrypted);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     /// <summary>Получить список всех записей карантина.</summary>
