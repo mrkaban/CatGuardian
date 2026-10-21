@@ -23,6 +23,12 @@ namespace CatGuardian.TrayHost;
 /// </summary>
 internal sealed class AlertPopupForm : Form
 {
+    /// <summary>
+    /// 3.0.1.6 (требование 3.4): кнопка решения POPUP (панель недоступна) — «Завершить» /
+    /// «В песочницу» / «Разморозить». Primary — решающее действие (зелёная кнопка).
+    /// </summary>
+    internal sealed record PopupAction(string Text, bool Primary, Action OnClick);
+
     private readonly Action? _onClear;
     private readonly Action? _onOpenPanel;
 
@@ -81,7 +87,8 @@ internal sealed class AlertPopupForm : Form
         }
     }
 
-    public AlertPopupForm(string title, string text, bool showClearButton, Action? onClear, Action? onOpenPanel)
+    public AlertPopupForm(string title, string text, bool showClearButton, Action? onClear, Action? onOpenPanel,
+        IReadOnlyList<PopupAction>? actions = null)
     {
         _onClear = onClear;
         _onOpenPanel = onOpenPanel;
@@ -195,7 +202,32 @@ internal sealed class AlertPopupForm : Form
             buttons.Controls.Add(open);
         }
 
-        if (showClearButton && _onClear is not null)
+        if (actions is { Count: > 0 })
+        {
+            // 3.0.1.6 (требование 3.4): кнопки решения (панель недоступна) — «Завершить» /
+            // «В песочницу» / «Разморозить». Решающее действие — зелёная кнопка (AcceptButton).
+            Button? primary = null;
+            foreach (var act in actions)
+            {
+                var captured = act;
+                var btn = MakeButton(captured.Text,
+                    captured.Primary ? pal.Green : pal.Accent,
+                    captured.Primary ? pal.GreenText : pal.AccentText,
+                    captured.Primary ? pal.Green : pal.Accent);
+                btn.Click += (_, _) =>
+                {
+                    try { captured.OnClick(); }
+                    finally { Close(); }
+                };
+                buttons.Controls.Add(btn);
+                if (captured.Primary && primary is null)
+                {
+                    primary = btn;
+                }
+            }
+            AcceptButton = primary ?? later;
+        }
+        else if (showClearButton && _onClear is not null)
         {
             // Как в панели: решающее действие «Очистить буфер» — зелёная кнопка.
             var clear = MakeButton(Tr.T("Tray.BtnClear"), pal.Green, pal.GreenText, pal.Green);

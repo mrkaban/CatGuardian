@@ -45,6 +45,12 @@ public sealed class TrayHostApplicationContext : ApplicationContext
     // результат уходит службе командой clipboard_alert (событие + лог + панель).
     private readonly ClipboardGuardWatcher _clipboardGuard = new();
 
+    // 3.0.1.6 (P0 3.7): per-session агент Winlock Shield — детект блокировки экрана
+    // в ИНТЕРАКТИВНОЙ сессии (служба в session 0 не видит окна session 1). Поллинг окон
+    // в отдельном STA-потоке; результат уходит службе командой winlock_detected
+    // (kill/карантин/восстановление Explorer выполняет служба SYSTEM).
+    private WinlockShieldDetector? _winlockShield;
+
     /// <summary>Окно (сек), в течение которого клик по иконке = клик по уведомлению.
     /// 3.0.1.5-fix (J2): снижено 45 → 10 с — клик по иконке не должен «уводить» пользователя
     /// на вкладку «Антивирус» спустя полминуты после исчезновения баллуна.</summary>
@@ -202,6 +208,17 @@ public sealed class TrayHostApplicationContext : ApplicationContext
 
         _client.Start();
 
+        // 3.0.1.6 (P0 3.7): запуск per-session детектора блокировки экрана.
+        try
+        {
+            _winlockShield = new WinlockShieldDetector(_client);
+            _winlockShield.Start();
+        }
+        catch (Exception ex)
+        {
+            TrayHostDiag.Write("WINLOCK-SHIELD: не удалось запустить детектор: " + ex.Message);
+        }
+
         // Первичная сверка модуля буфера сразу после старта хоста.
         RefreshClipboardGuard();
 
@@ -333,6 +350,11 @@ public sealed class TrayHostApplicationContext : ApplicationContext
     // показ маршалится через Control.BeginInvoke. WindowsFormsSynchronizationContext
     // использовать нельзя: контекст хоста не создаёт окон, поэтому Current не гарантирован.
     private AlertPopupForm? _alertPopup;
+    // P11-E (3.0.1.6-p11): кулдаун POPUP WinlockShield по ПОЛНОМУ пути файла (не папке!) —
+    // повторные детекты того же баннера не плодят баллуны (ВМ4: 3 уведомления об одном
+    // файле), а другие вредоносные файлы из той же папки НЕ получают иммунитет.
+    private readonly Dictionary<string, DateTime> _winlockPopupCooldown = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly TimeSpan WinlockPopupCooldown = TimeSpan.FromMinutes(10);
     private readonly Control _uiBridge;
 
     /// <summary>Читает мастер-свитч «Защиты буфера обмена» из config.json.</summary>
@@ -410,7 +432,8 @@ public sealed class TrayHostApplicationContext : ApplicationContext
     }
 
     /// <summary>Показывает окно алерта хоста в UI-потоке (безопасно из пула/канала).</summary>
-    private void ShowAlertPopup(string title, string text, bool showClearButton, Action? onClear)
+    private void ShowAlertPopup(string title, string text, bool showClearButton, Action? onClear,
+        int alertKind = 0, string actionKey = "", int pid = 0, string processPath = "")
     {
         void Show()
         {
@@ -426,7 +449,11 @@ public sealed class TrayHostApplicationContext : ApplicationContext
                     return;
                 }
 
-                var popup = new AlertPopupForm(title, text, showClearButton, onClear, () => OpenPanel(""));
+                // 3.0.1.6 (требование 3.4): для алертов-решений (Sandbox/Spyware/AntiStealer/
+                // Winlock) при недоступной панели POPUP получает кнопки «Завершить» /
+                // «В песочницу» / «Разморозить» — решение уходит службе командой alert_action.
+                var actions = BuildDecisionActions(alertKind, actionKey, pid, processPath);
+                var popup = new AlertPopupForm(title, text, showClearButton, onClear, () => OpenPanel(""), actions);
                 _alertPopup = popup;
                 popup.FormClosed += (_, _) =>
                 {
@@ -462,6 +489,101 @@ public sealed class TrayHostApplicationContext : ApplicationContext
         {
             TrayHostDiag.Write("POPUP: ошибка маршалинга показа окна алерта: " + ex.Message);
         }
+    }
+
+    /// <summary>
+    /// 3.0.1.6 (требование 3.4): кнопки решения POPUP для алертов-решений при недоступной
+    /// панели. Возвращает null для информационных видов (только «Позже»/«Открыть»).
+    /// </summary>
+    private List<AlertPopupForm.PopupAction>? BuildDecisionActions(
+        int alertKind, string actionKey, int pid, string processPath)
+    {
+        // Нет данных для действия — кнопки решения бессмысленны.
+        if (pid <= 0 && string.IsNullOrEmpty(actionKey))
+        {
+            return null;
+        }
+
+        var list = new List<AlertPopupForm.PopupAction>();
+        void Send(string action) => SendAlertAction(alertKind, actionKey, pid, processPath, action);
+
+        switch ((CatGuardian.Integrity.Ipc.IpcProtocol.MessageKind)alertKind)
+        {
+            case CatGuardian.Integrity.Ipc.IpcProtocol.MessageKind.SandboxAlert:
+                list.Add(new AlertPopupForm.PopupAction(Tr.T("Tray.BtnKill"), true, () => Send("kill")));
+                list.Add(new AlertPopupForm.PopupAction(Tr.T("Tray.BtnSandbox"), false, () => Send("sandbox")));
+                list.Add(new AlertPopupForm.PopupAction(Tr.T("Tray.BtnTrust"), false, () => Send("trust")));
+                break;
+
+            case CatGuardian.Integrity.Ipc.IpcProtocol.MessageKind.SpywareAlert:
+                list.Add(new AlertPopupForm.PopupAction(Tr.T("Tray.BtnKill"), true, () => Send("kill")));
+                list.Add(new AlertPopupForm.PopupAction(Tr.T("Tray.BtnTrust"), false, () => Send("trust")));
+                break;
+
+            case CatGuardian.Integrity.Ipc.IpcProtocol.MessageKind.AntiStealerAlert:
+                list.Add(new AlertPopupForm.PopupAction(Tr.T("Tray.BtnKill"), true, () => Send("kill")));
+                list.Add(new AlertPopupForm.PopupAction(Tr.T("Tray.BtnTrust"), false, () => Send("trust")));
+                break;
+
+            case CatGuardian.Integrity.Ipc.IpcProtocol.MessageKind.WinlockAlert:
+                // 3.0.1.6 (P1-3): WinlockShield-алерт (actionKey с префиксом «winlock_shield:») —
+                // кнопки «Завершить» / «Добавить в доверенные» / «Удалить файл». Служба
+                // различает его по префиксу и применяет whitelist/карантин по processPath.
+                if (actionKey.StartsWith("winlock_shield:", StringComparison.Ordinal))
+                {
+                    list.Add(new AlertPopupForm.PopupAction(Tr.T("Tray.BtnKill"), true, () => Send("kill")));
+                    list.Add(new AlertPopupForm.PopupAction(Tr.T("Tray.BtnTrustWinlock"), false, () => Send("trust")));
+                    list.Add(new AlertPopupForm.PopupAction(Tr.T("Tray.BtnDelete"), false, () => Send("delete")));
+                }
+                else
+                {
+                    // Старый AutoStart-Winlock: «Доверять/восстановить» из POPUP НЕ предлагаем —
+                    // службе нужны IsolatedPath/FilePath из полного WinlockAlertDto, которых в push
+                    // нет (восстановление .bak молча не сработало бы). Только «Оставить изолированным».
+                    list.Add(new AlertPopupForm.PopupAction(Tr.T("Tray.BtnKill"), true, () => Send("kill")));
+                }
+                break;
+
+            default:
+                return null;
+        }
+
+        return list;
+    }
+
+    /// <summary>3.0.1.6 (требование 3.4): отправляет решение пользователя POPUP службе.</summary>
+    private void SendAlertAction(int alertKind, string actionKey, int pid, string processPath, string action)
+    {
+        try
+        {
+            TrayHostDiag.Write(
+                $"POPUP: решение пользователя kind={alertKind} action={action} pid={pid} path={processPath}");
+            _ = _client.SendCommandAsync(new Dictionary<string, object?>
+            {
+                ["cmd"] = "alert_action",
+                ["alertKind"] = alertKind,
+                ["actionKey"] = actionKey,
+                ["pid"] = pid,
+                ["processPath"] = processPath,
+                ["action"] = action,
+            });
+        }
+        catch (Exception ex)
+        {
+            TrayHostDiag.Write("POPUP: ошибка отправки решения службе: " + ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// 3.0.1.6 (требование 3.4): алерты-решения (Sandbox/Spyware/AntiStealer/Winlock) —
+    /// POPUP НЕ закрываем самопроизвольно (ждём выбор пользователя), пока панель недоступна.
+    /// </summary>
+    private static bool IsDecisionAlertKind(int alertKind)
+    {
+        return alertKind == (int)CatGuardian.Integrity.Ipc.IpcProtocol.MessageKind.SandboxAlert
+            || alertKind == (int)CatGuardian.Integrity.Ipc.IpcProtocol.MessageKind.SpywareAlert
+            || alertKind == (int)CatGuardian.Integrity.Ipc.IpcProtocol.MessageKind.AntiStealerAlert
+            || alertKind == (int)CatGuardian.Integrity.Ipc.IpcProtocol.MessageKind.WinlockAlert;
     }
 
     private async Task<bool> CheckStatusAsync()
@@ -578,6 +700,20 @@ public sealed class TrayHostApplicationContext : ApplicationContext
                     // 3.0.0.93: алерт снят службой (стал неактуален) — закрываем POPUP.
                     // Пример: извлекли флэшку, о которой был вопрос «Обнаружен новый
                     // накопитель» — окно само не нужно, диска больше нет.
+                    var dismissKind = root.TryGetProperty("alertKind", out var dkEl) &&
+                                      dkEl.ValueKind == System.Text.Json.JsonValueKind.Number &&
+                                      dkEl.TryGetInt32(out var dkv)
+                        ? dkv
+                        : 0;
+                    // 3.0.1.6 (требование 3.4): POPUP алерта-РЕШЕНИЯ (Sandbox/Spyware/AntiStealer/
+                    // Winlock) НЕ закрываем самопроизвольно, пока панель недоступна — пользователь
+                    // должен принять решение кнопками. Иначе окно «мигало» и решение терялось.
+                    if (IsDecisionAlertKind(dismissKind) && !IsPanelProcessRunning())
+                    {
+                        TrayHostDiag.Write(
+                            $"PUSH alert_dismiss: kind={dismissKind} — POPUP решения НЕ закрываем (ждём выбор пользователя).");
+                        break;
+                    }
                     TrayHostDiag.Write("PUSH alert_dismiss: закрываем POPUP алерта");
                     var dismissPopup = _alertPopup;
                     if (dismissPopup is not null && !dismissPopup.IsDisposed)
@@ -599,6 +735,42 @@ public sealed class TrayHostApplicationContext : ApplicationContext
                                     akEl.TryGetInt32(out var akv)
                         ? akv
                         : 0;
+                    // 3.0.1.6 (требование 3.4): данные для кнопок решения POPUP.
+                    var alertActionKey = root.TryGetProperty("actionKey", out var akeyEl) ? akeyEl.GetString() ?? "" : "";
+                    var alertPid = root.TryGetProperty("pid", out var apidEl) &&
+                                   apidEl.ValueKind == System.Text.Json.JsonValueKind.Number &&
+                                   apidEl.TryGetInt32(out var apidv)
+                        ? apidv
+                        : 0;
+                    var alertProcessPath = root.TryGetProperty("processPath", out var appEl) ? appEl.GetString() ?? "" : "";
+
+                    // P5-A: WinlockShield-алерт в POPUP — показываем путь процесса и пометку
+                    // кириллического маскарада. Без этого пользователь видит только
+                    // «Экран-блокировщик изолирован» и думает, что убит РЕАЛЬНЫЙ explorer
+                    // (ВМ4: 3 алерта по C:\WINDОWS\ехрlоrеr.exe без пометки про кириллицу).
+                    if (alertKind == (int)CatGuardian.Integrity.Ipc.IpcProtocol.MessageKind.WinlockAlert
+                        && alertActionKey.StartsWith("winlock_shield:", StringComparison.Ordinal)
+                        && !string.IsNullOrWhiteSpace(alertProcessPath))
+                    {
+                        // P11-E: одно POPUP-уведомление на ПОЛНЫЙ путь файла в течение кулдауна.
+                        var popupNow = DateTime.UtcNow;
+                        if (_winlockPopupCooldown.TryGetValue(alertProcessPath, out var popupLast)
+                            && popupNow - popupLast < WinlockPopupCooldown)
+                        {
+                            TrayHostDiag.Write(
+                                $"PUSH alert: повторный WinlockShield-детект '{alertProcessPath}' — POPUP уже показан (кулдаун).");
+                            break;
+                        }
+                        _winlockPopupCooldown[alertProcessPath] = popupNow;
+
+                        var pathNote = alertProcessPath;
+                        if (CatGuardian.Antivirus.Core.MasqueradeNames.IsMasqueradePath(alertProcessPath))
+                        {
+                            pathNote += " ⚠ путь содержит кириллические символы — это НЕ системный файл (подмена).";
+                        }
+                        text = text + "\n" + pathNote;
+                    }
+
                     if (!string.IsNullOrWhiteSpace(text))
                     {
                         TrayHostDiag.Write("PUSH alert: " + text);
@@ -619,7 +791,8 @@ public sealed class TrayHostApplicationContext : ApplicationContext
                         // (окно покажет сама панель).
                         if (!IsPanelProcessRunning())
                         {
-                            ShowAlertPopup(title, text, showClearButton: false, onClear: null);
+                            ShowAlertPopup(title, text, showClearButton: false, onClear: null,
+                                alertKind, alertActionKey, alertPid, alertProcessPath);
                         }
                         else
                         {
@@ -639,7 +812,14 @@ public sealed class TrayHostApplicationContext : ApplicationContext
     private void SetServiceRunning(bool? running)
     {
         _serviceRunning = running;
-        SetMonitoringRunning(running == true);
+        // 3.0.1.6-fix (D4, серая иконка): grayscale ТОЛЬКО при явном «служба остановлена».
+        // Раньше null (первые секунды после старта TrayHost, пока не пришёл первый статус
+        // от службы) тоже давал серую иконку — при долгой инициализации/перегрузке ВМ
+        // иконка оставалась серой по 5 минут. Цветная по умолчанию (инициализация _colorIcon).
+        if (running.HasValue)
+        {
+            SetMonitoringRunning(running.Value);
+        }
 
         if (running == false || running is null)
         {
@@ -978,6 +1158,7 @@ public sealed class TrayHostApplicationContext : ApplicationContext
     {
         if (disposing)
         {
+            try { _winlockShield?.Dispose(); } catch { /* ignore */ }
             try { _client.Dispose(); } catch { /* ignore */ }
             try
             {
