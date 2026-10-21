@@ -251,6 +251,16 @@ public static class AntiSpyCore
                 $"Путь «{processPath}» — собственный установщик Cat Guardian (Inno Setup использует GDI для отрисовки мастера).");
         }
 
+        // P9-B (3.0.1.6-p9): собственный ДЕИНСТАЛЛЯТОР Cat Guardian (Inno Setup) — unins000.exe
+        // в каталоге установки и его временная копия _unins.tmp (Temp\iu-*.tmp\) линкуют те же
+        // GDI-функции и ложно детектировались как скринкаптер (ВМ 17.10: заморозка _unins.tmp
+        // при запуске деинсталлятора предыдущей версии).
+        if (IsOwnUninstaller(processPath))
+        {
+            return new AntiSpyDecision(AntiSpyVerdictKind.IgnoreWhitePath,
+                $"Путь «{processPath}» — собственный деинсталлятор Cat Guardian (Inno Setup использует GDI для отрисовки).");
+        }
+
         if (IsRegisteredAvPath(processPath, registeredAvPaths))
         {
             return new AntiSpyDecision(AntiSpyVerdictKind.IgnoreRegisteredAv,
@@ -316,6 +326,40 @@ public static class AntiSpyCore
             var ext = Path.GetExtension(name);
             return ext.Equals(".tmp", StringComparison.OrdinalIgnoreCase)
                 || ext.Equals(".exe", StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// P9-B (3.0.1.6-p9): true — путь принадлежит деинсталлятору Inno Setup Cat Guardian:
+    /// unins000.exe/unins000.dat в каталоге установки либо временная копия _unins*.tmp
+    /// (Temp\iu-XXXX.tmp\). Исключаем ТОЛЬКО деинсталлятор — детект чужих скринкаптеров
+    /// не страдает (у чужих программ unins000 лежит в ИХ каталогах, не в нашем).
+    /// </summary>
+    private static bool IsOwnUninstaller(string path)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(path)) return false;
+            var name = Path.GetFileName(path);
+            if (string.IsNullOrEmpty(name)) return false;
+            var lower = name.ToLowerInvariant();
+            if (!lower.StartsWith("unins000") && !lower.StartsWith("_unins")) return false;
+
+            var full = Path.GetFullPath(path);
+            var installDir = Path.GetFullPath(AppContext.BaseDirectory).TrimEnd('\\', '/');
+            if (full.StartsWith(installDir + "\\", StringComparison.OrdinalIgnoreCase))
+            {
+                return true; // unins000.exe/.dat в каталоге установки Cat Guardian
+            }
+
+            // Временная копия деинсталлятора Inno Setup: %Temp%\iu-XXXX.tmp\_unins.tmp
+            var temp = Path.GetTempPath();
+            return full.StartsWith(temp, StringComparison.OrdinalIgnoreCase)
+                && full.IndexOf("\\iu-", StringComparison.OrdinalIgnoreCase) >= 0;
         }
         catch
         {
