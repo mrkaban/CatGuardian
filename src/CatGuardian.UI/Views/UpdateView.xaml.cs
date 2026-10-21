@@ -820,7 +820,9 @@ public partial class UpdateView : UserControl
                 sent = MonitorPipeClient.TrySendMinerListsRefresh(TimeSpan.FromSeconds(5));
                 if (!sent)
                 {
-                    Ui(() => AppendLog(Tr.T("Upd.StatusWorking")));
+                    // D7 (3.0.1.6): НЕ добавляем строку в лог на каждой попытке — статус
+                    // уже установлен один раз выше («Выполняется обновление…»); повторные
+                    // строки «Обновление выполняется службой…» были дублями в журнале.
                     await Task.Delay(3000);
                 }
             }
@@ -850,11 +852,10 @@ public partial class UpdateView : UserControl
                         {
                             using var doc = System.Text.Json.JsonDocument.Parse(j);
                             var busy = doc.RootElement.TryGetProperty("updateInProgress", out var ub) && ub.GetBoolean();
-                            Ui(() =>
-                            {
-                                MinerProgress.Value = Math.Min(90, 10 + attempt * 4);
-                                AppendLog(Tr.T("Upd.MinerBusy"));
-                            });
+                            // D7 (3.0.1.6): только прогресс-бар, без AppendLog на каждой
+                            // итерации опроса — иначе 5-7 одинаковых строк «Обновление
+                            // выполняется службой…» в журнале обновлений.
+                            Ui(() => MinerProgress.Value = Math.Min(90, 10 + attempt * 4));
                             if (!busy)
                             {
                                 completed = true;

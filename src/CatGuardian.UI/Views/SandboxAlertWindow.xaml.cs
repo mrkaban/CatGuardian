@@ -233,6 +233,8 @@ public partial class SandboxAlertWindow : Window
             {
                 Action = action,
                 Pid = _alert.Pid,
+                // P23 (КРИТИЧЕСКОЕ): время создания процесса — PID-reuse сверка при «Завершить».
+                StartTimeUtc = _alert.StartTimeUtc,
                 ProcessPath = _alert.ProcessPath,
                 CommandLine = _alert.CommandLine,
             };

@@ -5,7 +5,8 @@
         Title="{loc:Loc Al2040}" Width="780" Height="660"
         MinWidth="660" MinHeight="540"
         WindowStartupLocation="CenterOwner" ShowInTaskbar="True"
-        ResizeMode="CanResize" FontFamily="Segoe UI" FontSize="13">
+        ResizeMode="CanResize" FontFamily="Segoe UI" FontSize="13"
+        Topmost="True">
     <!-- 3.0.0.36/3.0.0.48: шаблон алерт-окна семейства (см. EtwAlertWindow-эталон):
          баннер вердикта, секции в карточках, статус действия,
          решающие кнопки одной строкой, утилиты в шапке.
@@ -93,10 +94,10 @@
                            Foreground="{DynamicResource AmberBrush}">
                     🛡️ ПРЕДОТВРАЩЕНО — элемент блокировщика экрана изолирован
                 </TextBlock>
-                <TextBlock FontSize="12" TextWrapping="Wrap" Margin="0,2,0,0"
-                           Foreground="{DynamicResource TextBrush}">
-                    Блокировщик экрана прячет рабочий стол за фальшивым баннером и требует выкуп. Запись автозагрузки удалена, файл переименован в .bak.
-                </TextBlock>
+                <!-- P17: текст выставляется в code-behind по факту изоляции (карантин/.bak) —
+                     статичный «.bak» убран (файл перемещается в КАРАНТИН). -->
+                <TextBlock x:Name="WinlockBannerNote" FontSize="12" TextWrapping="Wrap" Margin="0,2,0,0"
+                           Foreground="{DynamicResource TextBrush}"/>
                 <TextBlock x:Name="WinlockEntryPoint" FontSize="12" FontWeight="SemiBold"
                            TextWrapping="Wrap" Margin="0,4,0,0"
                            Foreground="{DynamicResource RedBrush}" Visibility="Collapsed"/>
@@ -135,6 +136,11 @@
                             <TextBox x:Name="WinlockFilePath" Grid.Column="1" Style="{StaticResource InlineValue}"
                                      Margin="10,0,0,0" VerticalAlignment="Center"/>
                         </Grid>
+                        <!-- P6-A (3.0.1.6-p6): пометка кириллического маскарада СРАЗУ под путём
+                             (раньше фраза была только в сводке внизу — требование пользователя). -->
+                        <TextBlock x:Name="WinlockMasqueradeWarning" FontSize="12" FontWeight="SemiBold"
+                                   TextWrapping="Wrap" Margin="0,4,0,0"
+                                   Foreground="{DynamicResource RedBrush}" Visibility="Collapsed"/>
                         <Grid Margin="0,3,0,0">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="Auto"/>

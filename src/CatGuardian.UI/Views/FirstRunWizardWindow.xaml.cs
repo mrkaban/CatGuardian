@@ -10,6 +10,7 @@ using CatGuardian.Data;
 using CatGuardian.Firewall.Core;
 using CatGuardian.Firewall.Services;
 using CatGuardian.Integrity.Honeypot;
+using CatGuardian.Integrity.Hashing;
 using CatGuardian.Integrity.Ipc;
 using CatGuardian.Integrity.Models;
 using CatGuardian.Integrity.Scanning;
@@ -296,6 +297,20 @@ public partial class FirstRunWizardWindow : Window
                 notes.Add(Tr.T("Fwz.DepWinlock"));
             }
 
+            // W3-9 (3.0.1.6-fix): при включённом WinlockShield добавляем explorer.exe и userinit.exe
+            // в список корней эталона — даже если папка Windows не в списке, эталон этих файлов
+            // обязан быть снят (для проверки при восстановлении Explorer после kill баннера).
+            if (ModWinlockBox.IsChecked == true)
+            {
+                foreach (var f in WinlockShellBaselineFiles())
+                {
+                    if (File.Exists(f) && rootSet.Add(f))
+                    {
+                        WizardRootsList.Items.Add(f);
+                    }
+                }
+            }
+
             WizardDepHint.Text = notes.Count > 0
                 ? Tr.TF("Fwz.DepAddedFmt", string.Join("; ", notes))
                 : "";
@@ -412,7 +427,11 @@ public partial class FirstRunWizardWindow : Window
                         FirewallThreatsProgress.IsIndeterminate = false;
                         FirewallThreatsProgress.Maximum = Math.Max(total, 1);
                         FirewallThreatsProgress.Value = Math.Max(0, Math.Min(cur, Math.Max(total, 1)));
-                        FirewallThreatsStatus.Text = Tr.TF("Fwz.FwFeedFmt", cur, total, name);
+                        // P6-E (3.0.1.6-p6): при пустом имени фида (уже актуален/кэш) не
+                        // показывать бессмысленное «4 из 4 - » — пишем без тире.
+                        FirewallThreatsStatus.Text = string.IsNullOrWhiteSpace(name)
+                            ? Tr.TF("Fwz.FwFeedNoNameFmt", cur, total)
+                            : Tr.TF("Fwz.FwFeedFmt", cur, total, name);
                     }));
                 return manager.GetLastUpdateErrors();
             });
@@ -440,6 +459,12 @@ public partial class FirstRunWizardWindow : Window
                     ?.Select(x => x?.ToString() ?? "").Where(x => x.Length > 0).ToList()
                     ?? new List<string>();
 
+                // P6-E (3.0.1.6-p6): перед ДОЛГОЙ синхронизацией правил брандмауэра (тысячи
+                // правил ThreatIntel через Windows Firewall API) показываем конкретный статус
+                // и indeterminate-прогресс — раньше статус замирал на «Фиды: 4 из 4» на всё
+                // время SyncAsync (десятки секунд) и шаг выглядел зависшим.
+                FirewallThreatsProgress.IsIndeterminate = true;
+                FirewallThreatsStatus.Text = Tr.T("Fwz.FwSyncApplying");
                 var sync = await Task.Run(() =>
                     ThreatRuleSyncService.SyncAsync(new WindowsFirewallEngine(), manager, excluded));
                 syncDeleted = sync.Deleted;
@@ -868,7 +893,10 @@ public partial class FirstRunWizardWindow : Window
 
         if (config.MonitorAutoStart)
         {
-            foreach (var branch in AutoStartDefaultWatchBranches())
+            // P3-1: регистрируем ВСЕ включённые категории (как панель), а не только 9 базовых
+            // веток — иначе мастер снимал эталон с 9 веток и монитор видел «снимок реестра
+            // не покрывает включённые категории» (guardian_diag.log: 9 vs 21 веток).
+            foreach (var branch in EnabledAutoStartWatchBranches(config))
             {
                 if (existingWatches.Any(w => w.Kind == WatchKind.Registry &&
                         string.Equals(w.Target, branch, StringComparison.OrdinalIgnoreCase)))
@@ -949,6 +977,124 @@ public partial class FirstRunWizardWindow : Window
                 settings.SetExtensions(list);
             }
         }
+
+        // W3-9 (3.0.1.6-fix): при включённом WinlockShield добавляем explorer.exe и userinit.exe
+        // в список файлов эталона (WatchConfig Path) — даже если папка Windows не в корнях,
+        // эталон этих файлов обязан быть снят (для проверки подписи/эталона при восстановлении
+        // Explorer после kill баннера). DirectoryScanner обрабатывает файлы-корни (W3-9).
+        if (config.WinlockShieldEnabled || config.WinlockProtectionEnabled)
+        {
+            foreach (var f in WinlockShellBaselineFiles())
+            {
+                if (!File.Exists(f)) continue;
+                if (existingWatches.Any(w => w.Kind == WatchKind.Path &&
+                        string.Equals(w.Target, f, StringComparison.OrdinalIgnoreCase)))
+                {
+                    continue;
+                }
+                try
+                {
+                    service.Config.AddWatch(new WatchConfig
+                    {
+                        Kind = WatchKind.Path,
+                        Target = f,
+                        Enabled = true,
+                        Class = WatchClass.Continuous,
+                    });
+                }
+                catch { /* пропускаем */ }
+            }
+        }
+    }
+
+    /// <summary>W3-9 (3.0.1.6-fix): файлы оболочки, эталон которых обязан быть снят при
+    /// включённом WinlockShield (explorer.exe, userinit.exe) — для проверки подписи/эталона
+    /// при восстановлении Explorer после kill баннера.
+    /// P4-B3: + системные утилиты Microsoft (Taskmgr, cmd, powershell и т.п.) — их тоже
+    /// добавляем в список корней эталона шага 6 и в watch_config: папка Windows часто
+    /// удаляется из корней сканирования (слишком большая), иначе эталон Taskmgr не снялся
+    /// бы, и детектор не мог бы доказать, что это легитимная утилита.</summary>
+    private static IEnumerable<string> WinlockShellBaselineFiles()
+    {
+        yield return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe");
+        yield return Path.Combine(Environment.SystemDirectory, "userinit.exe");
+        foreach (var file in WinlockShellBaselineService.SystemUtilityFiles)
+        {
+            yield return Path.Combine(Environment.SystemDirectory, file);
+        }
+    }
+
+    /// <summary>
+    /// W3-9 (3.0.1.6-fix): гарантирует снятие эталона автозагрузки при включённом
+    /// «Контроле автозагрузки»/WinlockShield. Мастер позволял завершиться без эталона
+    /// (кнопка «Позже») — AutoStartMonitor молча не работал («снимок реестра не покрывает
+    /// включённые категории»), и баннер закреплялся в автозагрузке без алерта.
+    /// Здесь: регистрируем ветки автозагрузки в watch_config (Class=Continuous), снимаем
+    /// реестровый эталон (если не снят) и эталон оболочки explorer/userinit (если включён
+    /// WinlockShield). Снапшоты Startup/задач снимает сам AutoStartMonitor при первом тике
+    /// (W3-9 в CheckRegistry) — здесь реестровый эталон, без которого модуль не стартует.
+    /// </summary>
+    private void EnsureAutoStartBaseline()
+    {
+        try
+        {
+            var autoStartOn = ModAutoStartBox.IsChecked == true;
+            var winlockOn = ModWinlockBox.IsChecked == true;
+            if (!autoStartOn && !winlockOn)
+            {
+                return;
+            }
+
+            var service = new GuardianService();
+            var settings = new GuardianSettings(service.Config);
+
+            // 1) Регистрируем ветки автозагрузки в watch_config (Class=Continuous) —
+            //    иначе GetRegistryWatchKeys() вернёт DefaultRegistryKeys, не покрывающие
+            //    ветки автозагрузки, и HasBaselineCoverage останется false.
+            ApplyModuleDependencies(service, settings);
+
+            // 2) Реестровый эталон автозагрузки — снимаем, если НЕ ПОКРЫВАЕТ все включённые
+            //    ветки (P3-1: раньше проверяли только «пусто» — 9-веточный эталон прошлого
+            //    запуска блокировал пересъёмку, и монитор видел «снимок реестра не покрывает»).
+            var config = new AvConfig.JsonConfiguration();
+            config.Load();
+            var branches = EnabledAutoStartWatchBranches(config);
+            var existing = service.RegistryBaselines.GetByRoots(branches);
+            var existingRoots = new HashSet<string>(
+                existing.Select(r => r.Key), StringComparer.OrdinalIgnoreCase);
+            if (branches.Any(b => !existingRoots.Contains(b)))
+            {
+                service.CreateRegistryBaseline();
+                App.WriteDiagnostic("WIZARD: эталон автозагрузки снят (реестр).");
+            }
+
+            // 2.5) P4-E: снапшот папки Startup. «Эталон ещё не снят» в Контроле автозагрузки
+            // после мастера появлялся, потому что мастер снимал 17 реестровых веток, но
+            // панель (IsStartupSnapshotReady) и служба (HasBaselineCoverage) требуют ещё
+            // setting autostart_startup_snapshot при включённой категории «Папка Startup».
+            if (config.AutoStartCheckStartupFolder
+                && string.IsNullOrWhiteSpace(service.Config.GetSetting(StartupSnapshotSetting)))
+            {
+                service.Config.SetSetting(StartupSnapshotSetting,
+                    System.Text.Json.JsonSerializer.Serialize(CollectStartupSnapshot(), IpcProtocol.JsonOptions));
+                App.WriteDiagnostic("WIZARD: снапшот папки Startup снят.");
+            }
+
+            // 3) Эталон оболочки explorer/userinit И системных утилит (Taskmgr, cmd и т.п.,
+            //    P4-B3) — если включён WinlockShield и не снят. Утилиты снимаются «как
+            //    explorer/userinit»: старый эталон без записей SystemUtility переснимаем.
+            if (winlockOn
+                && (!WinlockShellBaselineService.IsReady()
+                    || !WinlockShellBaselineService.HasSystemUtilities()))
+            {
+                WinlockShellBaselineService.CaptureAsync().GetAwaiter().GetResult();
+                App.WriteDiagnostic("WIZARD: эталон оболочки и системных утилит снят.");
+            }
+        }
+        catch (Exception ex)
+        {
+            App.WriteDiagnostic("WIZARD: ошибка снятия эталона автозагрузки: " + ex.Message);
+        }
     }
 
     /// <summary>Ветки автозапуска для модуля «Контроль автозагрузки» (базовый набор категорий:
@@ -969,6 +1115,46 @@ public partial class FirstRunWizardWindow : Window
         };
     }
 
+    /// <summary>
+    /// P3-1: ветки автозапуска, включённые категориями «Контроля автозагрузки» (аналог
+    /// ProactiveProtectionView.GetAutoStartWatchBranches, БЕЗ StartupApproved — P3-3).
+    /// Мастер снимает эталон ровно с тех веток, что и панель, — иначе после мастера
+    /// «снимок реестра не покрывает включённые категории» и монитор молчит.
+    /// </summary>
+    private static List<string> EnabledAutoStartWatchBranches(AvConfig.JsonConfiguration config)
+    {
+        var list = new List<string>();
+        if (config.AutoStartCheckRun)
+        {
+            list.Add(@"HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Run");
+            list.Add(@"HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\RunOnce");
+            list.Add(@"HKEY_LOCAL_MACHINE\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Run");
+            list.Add(@"HKEY_LOCAL_MACHINE\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\RunOnce");
+            list.Add(@"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run");
+            list.Add(@"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\RunOnce");
+        }
+        if (config.AutoStartCheckWinlogon) list.Add(@"HKEY_LOCAL_MACHINE\Software\Microsoft\Windows NT\CurrentVersion\Winlogon");
+        if (config.AutoStartCheckIfeo) list.Add(@"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options");
+        if (config.AutoStartCheckServices) list.Add(@"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services");
+        if (config.AutoStartCheckRunServices)
+        {
+            list.Add(@"HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\RunServices");
+            list.Add(@"HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\RunServicesOnce");
+            list.Add(@"HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\RunOnceEx");
+        }
+        if (config.AutoStartCheckWinlogonNotify) list.Add(@"HKEY_LOCAL_MACHINE\Software\Microsoft\Windows NT\CurrentVersion\Winlogon\Notify");
+        if (config.AutoStartCheckAppInit) list.Add(@"HKEY_LOCAL_MACHINE\Software\Microsoft\Windows NT\CurrentVersion\Windows");
+        if (config.AutoStartCheckShellServiceObject) list.Add(@"HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\ShellServiceObjectDelayLoad");
+        if (config.AutoStartCheckActiveSetup) list.Add(@"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Active Setup\Installed Components");
+        if (config.AutoStartCheckPolicyRun)
+        {
+            list.Add(@"HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run");
+            list.Add(@"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run");
+        }
+        // StartupApproved (P3-3) не включаем — бинарные флаги одобрения, не команды запуска.
+        return list;
+    }
+
     /// <summary>Существующие папки Startup (пользователя и общие) — файловые точки наблюдения.</summary>
     private static IEnumerable<string> StartupFolders()
     {
@@ -984,6 +1170,55 @@ public partial class FirstRunWizardWindow : Window
                 yield return path;
             }
         }
+    }
+
+    // ---------------------------------------------------------------
+    // P4-E: снапшот папки Startup (settings guardian.db) — тот же формат,
+    // что требует панель (IsStartupSnapshotReady) и служба (HasBaselineCoverage).
+    // ---------------------------------------------------------------
+
+    /// <summary>Ключ снапшота папки Startup в settings guardian.db (единый со службой и панелью).</summary>
+    private const string StartupSnapshotSetting = "autostart_startup_snapshot";
+
+    /// <summary>Расширения файлов папки Startup, считающиеся точками автозапуска
+    /// (копия панели ProactiveProtectionView.StartupFileExtensions).</summary>
+    private static readonly HashSet<string> StartupFileExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".exe", ".dll", ".bat", ".cmd", ".lnk", ".url", ".vbs", ".js", ".ps1", ".com", ".scr", ".msi",
+    };
+
+    /// <summary>Собирает содержимое папок Startup (User + Common) как список {Path, Hash}
+    /// — формат снапшота службы (settings autostart_startup_snapshot). Без него после мастера
+    /// панель/служба считают эталон неснятым при включённой категории «Папка Startup».</summary>
+    private static List<Dictionary<string, string>> CollectStartupSnapshot()
+    {
+        var entries = new List<Dictionary<string, string>>();
+        try
+        {
+            foreach (var dir in StartupFolders())
+            {
+                foreach (var file in Directory.EnumerateFiles(dir))
+                {
+                    var ext = Path.GetExtension(file);
+                    if (ext.Length == 0 || !StartupFileExtensions.Contains(ext)) continue;
+                    try
+                    {
+                        var hashes = HashCalculator.Compute(file, new[] { HashAlgo.Sha256 });
+                        if (hashes is null || !hashes.TryGetValue(HashAlgo.Sha256, out var hash)) continue;
+                        entries.Add(new Dictionary<string, string> { ["Path"] = file, ["Hash"] = hash });
+                    }
+                    catch
+                    {
+                        // Файл мог быть удалён/занят — пропускаем.
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // Некритично: снапшот можно снять из панели кнопкой.
+        }
+        return entries;
     }
 
     // ---------------------------------------------------------------
@@ -1042,6 +1277,11 @@ public partial class FirstRunWizardWindow : Window
                 service.CreateRegistryBaseline((_, i, total) =>
                     Dispatcher.Invoke(() => BaselineStatus.Text =
                         Tr.TF("Fwz.RegistryProgressFmt", i, total)), null));
+
+            // D8g (3.0.1.6): эталон explorer.exe/userinit.exe снимается в рамках шага
+            // «эталон» — чтобы при включённом Winlock Shield детектор имел baseline
+            // (файл winlock_shell_baseline.json рядом с config.json).
+            await WinlockShellBaselineService.CaptureAsync();
 
             var elapsed = (DateTime.UtcNow - _baselineStartedAt).TotalSeconds;
             BaselineProgress.IsIndeterminate = false;
@@ -1151,6 +1391,12 @@ public partial class FirstRunWizardWindow : Window
             {
                 ApplyInspectorStep();
             }
+
+            // W3-9 (3.0.1.6-fix): гарантируем эталон автозагрузки при включённом
+            // «Контроле автозагрузки»/WinlockShield — «Позже» (SkipBaseline) не оставляет
+            // модуль нерабочим («снимок реестра не покрывает включённые категории»),
+            // иначе баннер закрепляется в автозагрузке без алерта.
+            EnsureAutoStartBaseline();
 
             // Шаг 3 — приманки: сохраняем настройки (набор создаст служба при первом старте).
             ApplyHoneyStep();

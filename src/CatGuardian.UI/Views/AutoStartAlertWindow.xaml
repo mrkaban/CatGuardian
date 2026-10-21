@@ -5,7 +5,8 @@
         Title="{loc:Loc Al0965}" Width="780" Height="640"
         MinWidth="660" MinHeight="540"
         WindowStartupLocation="CenterOwner" ShowInTaskbar="True"
-        ResizeMode="CanResize" FontFamily="Segoe UI" FontSize="13">
+        ResizeMode="CanResize" FontFamily="Segoe UI" FontSize="13"
+        Topmost="True">
     <!-- 3.0.0.36: шаблон алерт-окна семейства (см. EtwAlertWindow-эталон):
          баннер вердикта, секции в карточках, единый статус-блок,
          решающие кнопки одной строкой, утилиты в шапке. -->

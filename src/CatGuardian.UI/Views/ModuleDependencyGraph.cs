@@ -95,8 +95,8 @@ public sealed record DependencyProposal(
 /// о несоответствии сообщает hint модуля.
 ///
 /// Правила (подтверждены кодом службы):
-///  - Winlock работает внутри цикла AutoStartMonitor
-///    (AntivirusRunner.EnsureAutoStartMonitor: needed = MonitorAutoStart || WinlockProtectionEnabled);
+///  - Winlock Shield (защита от блокировки экрана) — НЕЗАВИСИМЫЙ модуль
+///    (WinlockShieldMonitor в службе, поллинг активной сессии), не связан с AutoStartMonitor;
 ///  - Browser Guard активен только вместе с мастером Anti-Stealer
 ///    (AntivirusRunner.BrowserStoreWatchEnabled => AntiStealerEnabled && AntiStealerWatchBrowserStores);
 ///  - Pre-Scan даёт скоринг и мгновенный Kill для Ransomware (RansomwareMonitor использует
@@ -109,7 +109,10 @@ public static class ModuleDependencyGraph
     /// <summary>Пары «зависимый модуль → требуемый модуль» (один к одному).</summary>
     private static readonly (ModuleKey Dependent, ModuleKey Required, bool Hard)[] Requires =
     {
-        (ModuleKey.Winlock,       ModuleKey.AutoStart,  true),
+        // 3.0.1.6 (требование B): связь Winlock→AutoStart РАЗОРВАНА. Защита от блокировщиков
+        // экрана теперь работает НЕЗАВИСИМЫМ модулем WinlockShield (детектор блокировки экрана),
+        // а не фильтром автозагрузки внутри AutoStartMonitor. Включение Winlock не требует
+        // включения «Контроля автозагрузки».
         (ModuleKey.BrowserGuard,  ModuleKey.AntiStealer, true),
         // 3.0.0.47: System Credential Guard работает только вместе с мастером Anti-Stealer
         // (AntivirusRunner.SystemCredentialWatchEnabled => AntiStealerEnabled && AntiStealerWatchSystemCredentials).
@@ -134,7 +137,8 @@ public static class ModuleDependencyGraph
     public static bool IsOn(JsonConfiguration c, ModuleKey key) => key switch
     {
         ModuleKey.AutoStart       => c.MonitorAutoStart,
-        ModuleKey.Winlock         => c.WinlockProtectionEnabled,
+        // 3.0.1.6 (требование B): Winlock Shield — независимый детектор блокировки экрана.
+        ModuleKey.Winlock         => c.WinlockShieldEnabled,
         // 3.0.0.45: AMSI и мониторинг WMI участвуют в графе зависимостей.
         ModuleKey.Amsi            => c.AmsiEnabled,
         ModuleKey.Wmi             => c.WmiSubscriptionEnabled,
@@ -164,7 +168,8 @@ public static class ModuleDependencyGraph
         switch (key)
         {
             case ModuleKey.AutoStart:       c.MonitorAutoStart = value; break;
-            case ModuleKey.Winlock:         c.WinlockProtectionEnabled = value; break;
+            // 3.0.1.6 (требование B): Winlock Shield — независимый детектор блокировки экрана.
+            case ModuleKey.Winlock:         c.WinlockShieldEnabled = value; break;
             // 3.0.0.45: связанное включение AMSI/WMI через граф зависимостей.
             case ModuleKey.Amsi:            c.AmsiEnabled = value; break;
             case ModuleKey.Wmi:             c.WmiSubscriptionEnabled = value; break;
@@ -296,7 +301,7 @@ public static class ModuleDependencyGraph
     private static string HardQuestion(ModuleKey dependent, ModuleKey required) =>
         (dependent, required) switch
         {
-            (ModuleKey.Winlock, ModuleKey.AutoStart) => Tr.T("Md.HardWinlock"),
+            // 3.0.1.6 (требование B): связь Winlock→AutoStart разорвана — жёсткой связи нет.
             (ModuleKey.BrowserGuard, ModuleKey.AntiStealer) => Tr.T("Md.HardBrowserGuard"),
             (ModuleKey.SystemCredential, ModuleKey.AntiStealer) => Tr.T("Md.HardSysCredential"),
             _ => Tr.TF("Md.HardDefaultFmt", DisplayName(dependent), DisplayName(required)),

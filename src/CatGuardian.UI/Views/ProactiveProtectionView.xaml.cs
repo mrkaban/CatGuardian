@@ -379,7 +379,6 @@ public partial class ProactiveProtectionView : UserControl
             CatTasks.IsChecked = _config.AutoStartCheckTasks;
             // 3.0.0.41: расширенные категории.
             CatStartupFolder.IsChecked = _config.AutoStartCheckStartupFolder;
-            CatStartupApproved.IsChecked = _config.AutoStartCheckStartupApproved;
             CatRunServices.IsChecked = _config.AutoStartCheckRunServices;
             CatWinlogonNotify.IsChecked = _config.AutoStartCheckWinlogonNotify;
             CatAppInit.IsChecked = _config.AutoStartCheckAppInit;
@@ -553,14 +552,16 @@ public partial class ProactiveProtectionView : UserControl
             Mod1PrivacyWatchOnly.IsChecked = !_config.PrivacyShieldEnforce;
             SelectPrivacyPoll(_config.PrivacyShieldPollMs);
 
-            // 3.0.0.20: защита от блокировщиков экрана (Winlock Protection).
-            var winlockOn = _config.WinlockProtectionEnabled;
+            // 3.0.1.6 (требование B): Winlock Shield — детектор блокировки экрана.
+            // Единая карточка «Защита от блокировки экрана» (Winlock Shield): детектирует
+            // блокировку экрана (закрытие Explorer, полноэкранный баннер) и восстанавливает
+            // рабочий стол. Старый фильтр автозагрузки (WinlockProtectionEnabled) больше
+            // не используется в панели — защита работает независимым монитором.
+            var winlockOn = _config.WinlockShieldEnabled;
             Mod1Winlock.IsChecked = winlockOn;
             UpdateWinlockState(winlockOn);
-            Mod1WinlockRename.IsChecked = _config.WinlockRenameIsolation;
-            Mod1WinlockKill.IsChecked = _config.WinlockKillProcess;
-            // 3.0.0.48 (L3): рабочий стол в зонах риска.
-            Mod1WinlockDesktop.IsChecked = _config.WinlockDesktopZone;
+            Mod1WinlockKill.IsChecked = _config.WinlockShieldAutoKill;
+            Mod1WinlockRestore.IsChecked = _config.WinlockShieldRestoreExplorer;
 
             // 3.0.0.23: анти-майнер (эвристический контроль криптоджекеров).
             var minerOn = _config.AntiMinerEnabled;
@@ -789,7 +790,7 @@ public partial class ProactiveProtectionView : UserControl
     /// отправляется ReloadConfig. Модуль работает внутри «Контроля автозагрузки» —
     /// при включении он активируется автоматически (галочка Модуля 3 и конфиг).
     /// </summary>
-    private void OnWinlockToggled(object sender, RoutedEventArgs e)
+    private async void OnWinlockToggled(object sender, RoutedEventArgs e)
     {
         if (_syncing) return;
         var on = Mod1Winlock.IsChecked == true;
@@ -799,42 +800,36 @@ public partial class ProactiveProtectionView : UserControl
         {
             _config.Load();
 
-            // 3.0.0.35: жёсткая связь Winlock → Контроль автозагрузки (Winlock работает
-            // внутри цикла AutoStartMonitor). Предлагаем включить автозагрузку; при
-            // отказе — действие откатывается.
-            var winlockApplied = new List<DependencyProposal>();
-            if (on)
-            {
-                if (!ConfirmModuleToggle(ModuleKey.Winlock, true, out var winlockProps))
-                {
-                    return;
-                }
-                winlockApplied = winlockProps;
-            }
-
-            _config.WinlockProtectionEnabled = on;
+            // 3.0.1.6 (требование B): единый модуль Winlock Shield — детектор блокировки
+            // экрана. Связь с «Контролем автозагрузки» РАЗОРВАНА: защита работает
+            // независимым монитором (поллинг активной сессии), а не фильтром автозагрузки.
+            _config.WinlockShieldEnabled = on;
             _config.Save();
-            Diag($"Сохранено: WinlockProtectionEnabled={_config.WinlockProtectionEnabled}");
+            Diag($"Сохранено: WinlockShieldEnabled={_config.WinlockShieldEnabled}");
             UpdateWinlockState(on);
-            NotifyAppliedLinks(ModuleKey.Winlock, winlockApplied);
 
+            // D8g (3.0.1.6): эталон explorer/userinit — снимаем при включении модуля,
+            // удаляем при выключении (детектор TrayHost читает файл напрямую, как config.json).
             if (on)
             {
-                var ok = MonitorPipeClient.TrySend(IpcProtocol.MessageKind.ReloadConfig, null, TimeSpan.FromSeconds(2));
-                Mod1WinlockHint.Text = ok
-                    ? Tr.T("Pp0500")
-                    : Tr.T("Pp0492");
+                await WinlockShellBaselineService.CaptureAsync();
+                Diag($"WinlockShellBaseline: снят (ready={WinlockShellBaselineService.IsReady()}).");
             }
             else
             {
-                MonitorPipeClient.TrySend(IpcProtocol.MessageKind.ReloadConfig, null, TimeSpan.FromSeconds(2));
-                Mod1WinlockHint.Text = Tr.T("Pp0502");
+                WinlockShellBaselineService.Delete();
+                Diag("WinlockShellBaseline: удалён (модуль выключен).");
             }
+
+            var ok = MonitorPipeClient.TrySend(IpcProtocol.MessageKind.ReloadConfig, null, TimeSpan.FromSeconds(2));
+            Mod1WinlockHint.Text = on
+                ? (ok ? Tr.T("PpWinlockShieldSavedOn") : Tr.T("PpWinlockShieldSavedNoSvc"))
+                : Tr.T("PpWinlockShieldSavedOff");
         }
         catch (Exception ex)
         {
-            Diag(Tr.T("Pp0503") + ex.Message);
-            Mod1WinlockHint.Text = Tr.T("Pp0497") + ex.Message;
+            Diag(Tr.T("PpWinlockShieldSaveError") + ex.Message);
+            Mod1WinlockHint.Text = Tr.T("PpWinlockShieldSaveError") + ex.Message;
             RefreshFromConfig();
         }
     }
@@ -859,10 +854,8 @@ public partial class ProactiveProtectionView : UserControl
         try
         {
             _config.Load();
-            _config.WinlockRenameIsolation = Mod1WinlockRename.IsChecked == true;
-            _config.WinlockKillProcess = Mod1WinlockKill.IsChecked == true;
-            // 3.0.0.48 (L3): рабочий стол в зонах риска.
-            _config.WinlockDesktopZone = Mod1WinlockDesktop.IsChecked == true;
+            _config.WinlockShieldAutoKill = Mod1WinlockKill.IsChecked == true;
+            _config.WinlockShieldRestoreExplorer = Mod1WinlockRestore.IsChecked == true;
             _config.Save();
             MonitorPipeClient.TrySend(IpcProtocol.MessageKind.ReloadConfig, null, TimeSpan.FromSeconds(2));
         }
@@ -4351,13 +4344,8 @@ public partial class ProactiveProtectionView : UserControl
             list.Add(AllAutoStartWatchBranches[16]);
             list.Add(AllAutoStartWatchBranches[17]);
         }
-        if (_config.AutoStartCheckStartupApproved)
-        {
-            list.Add(AllAutoStartWatchBranches[18]);
-            list.Add(AllAutoStartWatchBranches[19]);
-            list.Add(AllAutoStartWatchBranches[20]);
-            list.Add(AllAutoStartWatchBranches[21]);
-        }
+        // P3-3: StartupApproved (18..21) исключены — бинарные флаги одобрения Explorer,
+        // не команды запуска (ложные алерты «новый элемент автозапуска», путь не определён).
         return list;
     }
 
@@ -4693,7 +4681,6 @@ public partial class ProactiveProtectionView : UserControl
             _config.AutoStartCheckTasks = CatTasks.IsChecked == true;
             // 3.0.0.41: расширенные категории.
             _config.AutoStartCheckStartupFolder = CatStartupFolder.IsChecked == true;
-            _config.AutoStartCheckStartupApproved = CatStartupApproved.IsChecked == true;
             _config.AutoStartCheckRunServices = CatRunServices.IsChecked == true;
             _config.AutoStartCheckWinlogonNotify = CatWinlogonNotify.IsChecked == true;
             _config.AutoStartCheckAppInit = CatAppInit.IsChecked == true;
@@ -4703,7 +4690,7 @@ public partial class ProactiveProtectionView : UserControl
             _config.Save();
             Diag($"Категории сохранены: Run={_config.AutoStartCheckRun}, Winlogon={_config.AutoStartCheckWinlogon}, " +
                  $"IFEO={_config.AutoStartCheckIfeo}, Services={_config.AutoStartCheckServices}, Tasks={_config.AutoStartCheckTasks}, " +
-                 $"StartupFolder={_config.AutoStartCheckStartupFolder}, StartupApproved={_config.AutoStartCheckStartupApproved}, " +
+                 $"StartupFolder={_config.AutoStartCheckStartupFolder}, " +
                  $"RunServices={_config.AutoStartCheckRunServices}, WinlogonNotify={_config.AutoStartCheckWinlogonNotify}, " +
                  $"AppInit={_config.AutoStartCheckAppInit}, SSODL={_config.AutoStartCheckShellServiceObject}, " +
                  $"ActiveSetup={_config.AutoStartCheckActiveSetup}, PolicyRun={_config.AutoStartCheckPolicyRun}");

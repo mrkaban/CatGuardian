@@ -1413,10 +1413,6 @@
                                           VerticalAlignment="Center"
                                           ToolTip="{loc:Loc Pp0339}"
                                           Checked="OnAutoStartCategoryChanged" Unchecked="OnAutoStartCategoryChanged"/>
-                                <CheckBox x:Name="CatStartupApproved" Content="StartupApproved" Margin="0,2,12,2"
-                                          VerticalAlignment="Center"
-                                          ToolTip="{loc:Loc Pp0340}"
-                                          Checked="OnAutoStartCategoryChanged" Unchecked="OnAutoStartCategoryChanged"/>
                                 <CheckBox x:Name="CatRunServices" Content="RunServices/RunOnceEx" Margin="0,2,12,2"
                                           VerticalAlignment="Center"
                                           Checked="OnAutoStartCategoryChanged" Unchecked="OnAutoStartCategoryChanged"/>
@@ -1584,14 +1580,12 @@
 
                     <Rectangle Height="1" Fill="{DynamicResource BorderBrush}" Margin="0,12"/>
 
-                    <!-- Защита от блокировщиков экрана (Winlock Protection, 3.0.0.20): РЕАЛИЗОВАНА.
-                         Свитч управляет WinlockProtectionEnabled; по умолчанию ВЫКЛЮЧЕНА (нулевая
-                         нагрузка — фильтр работает только внутри цикла контроля автозагрузки).
-                         Превентивная изоляция неподписанного exe из временной папки,
-                         закрепившегося в автозагрузке (баннер-блокировщик экрана):
-                         переименование .bak + удаление записи. Включение автоматически
-                         включает «Контроль автозагрузки». Перенесена из Модуля 1 в Модуль 3
-                         при ревизии структуры 3.0.0.24 (работает внутри Persistence Control). -->
+                    <!-- 3.0.1.6 (требование B): Защита от блокировки экрана (Winlock Shield).
+                         ЕДИНЫЙ модуль — детектор блокировки экрана в реальном времени.
+                         Свитч управляет WinlockShieldEnabled (включён по умолчанию). Поллинг
+                         активной сессии: полноэкранное окно + убитый Explorer → kill ≤3-5 с,
+                         восстановление Explorer, BlockInput(false), карантин+Remember.
+                         НЕ фильтр автозагрузки — работает независимо от «Контроля автозагрузки». -->
                     <Grid>
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto"/>
@@ -1606,28 +1600,21 @@
                                    FontSize="11" Margin="8,4,0,0"/>
                         <StackPanel Grid.Column="2" Margin="12,0,0,0">
                             <TextBlock FontWeight="Bold" FontSize="13" Foreground="{DynamicResource TextBrush}"
-                                       Text="{loc:Loc Pp0377}"/>
+                                       Text="{loc:Loc PpWinlockShieldTitle}"/>
                             <TextBlock Foreground="{DynamicResource MutedBrush}" FontSize="12" TextWrapping="Wrap" Margin="0,2,0,0"
-                                       Text="{loc:Loc Pp0378}"/>
+                                       Text="{loc:Loc PpWinlockShieldDesc}"/>
                             <StackPanel x:Name="Mod1WinlockPanel" Visibility="Collapsed" Margin="0,10,0,0">
                                 <WrapPanel Orientation="Horizontal" Margin="0,0,0,0">
-                                    <CheckBox x:Name="Mod1WinlockRename" Content="{loc:Loc Pp0379}"
+                                    <CheckBox x:Name="Mod1WinlockKill" Content="{loc:Loc PpWinlockShieldAutoKill}"
                                               Margin="0,2,16,2" VerticalAlignment="Center"
-                                              ToolTip="{loc:Loc Pp0380}"
                                               Checked="OnWinlockOptionChanged" Unchecked="OnWinlockOptionChanged"/>
-                                    <CheckBox x:Name="Mod1WinlockKill" Content="{loc:Loc Pp0381}"
-                                              Margin="0,2,16,2" VerticalAlignment="Center"
-                                              ToolTip="{loc:Loc Pp0382}"
-                                              Checked="OnWinlockOptionChanged" Unchecked="OnWinlockOptionChanged"/>
-                                    <!-- 3.0.0.48 (L3): рабочий стол в зонах риска (опция выключена по умолчанию). -->
-                                    <CheckBox x:Name="Mod1WinlockDesktop" Content="{loc:Loc Pp0383}"
+                                    <CheckBox x:Name="Mod1WinlockRestore" Content="{loc:Loc PpWinlockShieldRestore}"
                                               Margin="0,2,0,2" VerticalAlignment="Center"
-                                              ToolTip="{loc:Loc Pp0384}"
                                               Checked="OnWinlockOptionChanged" Unchecked="OnWinlockOptionChanged"/>
                                 </WrapPanel>
                                 <TextBlock x:Name="Mod1WinlockHint" Foreground="{DynamicResource MutedBrush}" FontSize="11"
                                            TextWrapping="Wrap" Margin="0,8,0,0"
-                                           Text="{loc:Loc Pp0385}"/>
+                                           Text="{loc:Loc PpWinlockShieldHint}"/>
                             </StackPanel>
                         </StackPanel>
                     </Grid>
