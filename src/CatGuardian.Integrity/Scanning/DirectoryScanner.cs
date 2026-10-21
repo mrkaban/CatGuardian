@@ -25,6 +25,18 @@ public sealed class DirectoryScanner
             {
                 stack.Push(Path.GetFullPath(root));
             }
+            // W3-9 (3.0.1.6-fix): корень может быть ОТДЕЛЬНЫМ ФАЙЛОМ (например
+            // %SystemRoot%\explorer.exe / userinit.exe, добавленные мастером при включении
+            // WinlockShield). Раньше файл-корень молча пропускался (Directory.Exists=false),
+            // и эталон этих файлов не снимался, если папка Windows не в корнях.
+            else if (File.Exists(root) && MatchesExtension(root, options))
+            {
+                var key = Path.GetFullPath(root);
+                if (seen.Add(key))
+                {
+                    yield return key;
+                }
+            }
         }
 
         while (stack.Count > 0)
