@@ -138,8 +138,10 @@ public sealed class JsonConfiguration : IConfiguration
     /// 3.0.0.17: расширен популярными вендорами (Яндекс, Mozilla, Adobe, Apple и др.) —
     /// иммунитет по-прежнему снимается для запуска из подозрительных папок (см. ReputationScorer).</summary>
     public string PreScanTrustedPublishers { get; set; } = DefaultTrustedPublishers;
-    /// <summary>Подозрительные папки через ';' (поддерживаются переменные среды %TEMP% и т.п.).</summary>
-    public string PreScanSuspiciousFolders { get; set; } = "%TEMP%;%ProgramData%;C:\\Users\\Public";
+    /// <summary>Подозрительные папки через ';' (поддерживаются переменные среды %TEMP% и т.п.).
+    /// 3.0.1.6: добавлены Desktop/Downloads/Documents — в логах VM баннер и вирусы
+    /// запускались именно с рабочего стола, а PreScan их пропускал rate-limit'ом.</summary>
+    public string PreScanSuspiciousFolders { get; set; } = "%TEMP%;%ProgramData%;C:\\Users\\Public;%USERPROFILE%\\Desktop;%USERPROFILE%\\Downloads;%USERPROFILE%\\Documents";
     /// <summary>
     /// Локальные доверенные корни через ';' (имя Issuer корневого сертификата цепочки).
     /// Цепочка к таким корням валидируется вручную, когда Windows не доверяет издателю.
@@ -444,6 +446,34 @@ public sealed class JsonConfiguration : IConfiguration
     /// исполняемый файл на рабочий стол пользователя.</summary>
     public bool WinlockDesktopZone { get; set; } = true;
 
+    // 3.0.1.6 (требование B): Winlock Shield — детектор блокировки экрана в реальном
+    // времени (полноэкранное окно без крестика + убитый Explorer + BlockInput).
+    // НЕ фильтр автозагрузки — старый WinlockProtectionEnabled остаётся только как
+    // часть «Контроля автозагрузки».
+    /// <summary>Мастер-свитч Winlock Shield (детектор блокировки экрана).
+    /// 3.0.1.6 (требование B): включён ПО УМОЛЧАНИЮ — баннер-щит обязан защищать
+    /// от 100% баннеров из коробки (детекция блокировки экрана, не фильтр автозагрузки).</summary>
+    public bool WinlockShieldEnabled { get; set; } = true;
+    /// <summary>Период поллинга активной сессии (мс). P8-D: 500 мс по умолчанию — реакция
+    /// баннерного детектора быстрее (ВМ7: баннер висел ~3 минуты).</summary>
+    public int WinlockShieldPollMs { get; set; } = 500;
+    /// <summary>Автоматически завершать процесс-баннер после детекта.</summary>
+    public bool WinlockShieldAutoKill { get; set; } = true;
+    /// <summary>Восстанавливать Explorer в активной сессии, если он был убит баннером.</summary>
+    public bool WinlockShieldRestoreExplorer { get; set; } = true;
+    /// <summary>P6-B (3.0.1.6-p6): убивать родительский процесс баннера (dropper), чтобы он
+    /// не пересоздавал баннер после kill. Проверки родителя: путь+подпись (IsCriticalProcessPath),
+    /// свой процесс (IsWinlockOwnProcess), whitelist пользователя (IsWinlockWhitelisted).</summary>
+    public bool WinlockShieldKillParent { get; set; } = true;
+    /// <summary>Порог сигналов для срабатывания (1-4; полноэкранный баннер = 2).</summary>
+    public int WinlockShieldMinSignals { get; set; } = 2;
+    /// <summary>3.0.1.6 (P0 3.7-whitelist): порог SOFT-сигналов (предупреждение без kill), default 2.
+    /// Hard-сигнал (Explorer убит + (BlockInput ИЛИ topmost)) — отдельный флаг, не зависит от суммы.</summary>
+    public int WinlockShieldMinSignalsForSoft { get; set; } = 2;
+    /// <summary>3.0.1.6 (P0 3.7-whitelist): whitelist Winlock Shield — записи {Path|Hash, Publisher, Reason}.
+    /// Хранится отдельным ключом, защищён config.json.guard; изменения только через IPC (4.8).</summary>
+    public List<WinlockWhitelistEntry> WinlockShieldWhitelist { get; set; } = new();
+
     // 3.0.0.30: Инспектор подмены ярлыков (Shortcut Hijacking Protection).
     // Детект изменения цели (TargetPath) или аргументов существующих .lnk на рабочем столе,
     // общем рабочем столе и в Quick Launch относительно эталона + анализ новой цели
@@ -618,8 +648,8 @@ public sealed class JsonConfiguration : IConfiguration
 
     public string UpdateServer { get; set; } = "database.clamav.net";
     public bool UpdateDatabaseAutomatically { get; set; } = true;
-    /// <summary>Интервал автообновления по умолчанию: 8 часов = 3 проверки в сутки (3.0.0.10).</summary>
-    public int AutoUpdateIntervalHours { get; set; } = 8;
+    /// <summary>Интервал автообновления по умолчанию: 12 часов = НЕ чаще 2 раз в сутки (3.0.1.6, требование A2).</summary>
+    public int AutoUpdateIntervalHours { get; set; } = 12;
     /// <summary>3.0.1.5: автообновление фидов угроз (CINS/ET) по единому таймеру обновлений.</summary>
     public bool AutoUpdateThreatFeeds { get; set; } = true;
     /// <summary>3.0.1.5: автообновление списков доменов майнеров по единому таймеру обновлений.</summary>
@@ -956,6 +986,15 @@ public sealed class JsonConfiguration : IConfiguration
         public bool? WinlockKillProcess { get; set; }
         // 3.0.0.48 (L3): рабочий стол в зонах риска.
         public bool? WinlockDesktopZone { get; set; }
+        // 3.0.1.6 (требование B): Winlock Shield — детектор блокировки экрана.
+        public bool? WinlockShieldEnabled { get; set; }
+        public int? WinlockShieldPollMs { get; set; }
+        public bool? WinlockShieldAutoKill { get; set; }
+        public bool? WinlockShieldRestoreExplorer { get; set; }
+        public bool? WinlockShieldKillParent { get; set; }
+        public int? WinlockShieldMinSignals { get; set; }
+        public int? WinlockShieldMinSignalsForSoft { get; set; }
+        public List<WinlockWhitelistEntryDto>? WinlockShieldWhitelist { get; set; }
         // 3.0.0.23: Анти-майнер — иначе ключи исчезают из config.json при перезаписи,
         // а модуль после Load() всегда остаётся выключенным.
         public bool? AntiMinerEnabled { get; set; }
@@ -1050,6 +1089,28 @@ public sealed class JsonConfiguration : IConfiguration
         public int? MaxLogSizeMb { get; set; }
     }
 
+    /// <summary>3.0.1.6 (P0 3.7-whitelist): DTO записи whitelist Winlock Shield (config.json).</summary>
+    public sealed class WinlockWhitelistEntryDto
+    {
+        public string? Path { get; set; }
+        public string? Hash { get; set; }
+        public string? Publisher { get; set; }
+        public string? Reason { get; set; }
+        public string? AddedBy { get; set; }
+        public DateTime? AddedAt { get; set; }
+    }
+
+    /// <summary>3.0.1.6 (P0 3.7-whitelist): запись whitelist Winlock Shield (рабочая модель).</summary>
+    public sealed class WinlockWhitelistEntry
+    {
+        public string? Path { get; set; }
+        public string? Hash { get; set; }
+        public string? Publisher { get; set; }
+        public string? Reason { get; set; }
+        public string? AddedBy { get; set; }
+        public DateTime? AddedAt { get; set; }
+    }
+
     public void Load()
     {
         if (!File.Exists(_configFilePath))
@@ -1073,6 +1134,14 @@ public sealed class JsonConfiguration : IConfiguration
         {
             // 3.0.0.17: self-defense — сверяем файл со страж-подписью ДО разбора.
             var rawText = File.ReadAllText(_configFilePath);
+            // 3.0.1.6 (требование 4.1): защита от молчаливой перегенерации конфига.
+            // Если файл усечён/повреждён (частичная запись, сбой) — откат к эталону
+            // (config.json.snapshot) ДО разбора, чтобы дефолты не затёрли настройки
+            // пользователя (в логах ВМ: песочница 70→50, авто-kill False→True и т.п.).
+            if (TryRestoreFromSnapshot(rawText, out var restoredText))
+            {
+                rawText = restoredText;
+            }
             _tamperDetected = !VerifyGuard(rawText);
 
             var dto = JsonSerializer.Deserialize<ConfigDto>(rawText, SerializerOptions);
@@ -1197,7 +1266,7 @@ public sealed class JsonConfiguration : IConfiguration
                 ? DefaultTrustedPublishers
                 : dto.PreScanTrustedPublishers;
             PreScanSuspiciousFolders = string.IsNullOrWhiteSpace(dto.PreScanSuspiciousFolders)
-                ? "%TEMP%;%ProgramData%;C:\\Users\\Public"
+                ? "%TEMP%;%ProgramData%;C:\\Users\\Public;%USERPROFILE%\\Desktop;%USERPROFILE%\\Downloads;%USERPROFILE%\\Documents"
                 : dto.PreScanSuspiciousFolders;
             PreScanTrustedLocalRoots = string.IsNullOrWhiteSpace(dto.PreScanTrustedLocalRoots)
                 ? DefaultTrustedLocalRoots()
@@ -1320,6 +1389,30 @@ public sealed class JsonConfiguration : IConfiguration
             // 3.0.0.48 (L3): рабочий стол — вне зон риска по умолчанию.
             // 3.0.1.4: по умолчанию true — баннеры-блокировщики кладут exe на рабочий стол.
             WinlockDesktopZone = dto.WinlockDesktopZone ?? true;
+            // 3.0.1.6 (требование B): Winlock Shield — детектор блокировки экрана.
+            // Включён по умолчанию (баннер-щит обязан работать из коробки).
+            WinlockShieldEnabled = dto.WinlockShieldEnabled ?? true;
+            WinlockShieldPollMs = Math.Clamp(dto.WinlockShieldPollMs ?? 500, 300, 5000);
+            WinlockShieldAutoKill = dto.WinlockShieldAutoKill ?? true;
+            WinlockShieldRestoreExplorer = dto.WinlockShieldRestoreExplorer ?? true;
+            WinlockShieldKillParent = dto.WinlockShieldKillParent ?? true;
+            WinlockShieldMinSignals = Math.Clamp(dto.WinlockShieldMinSignals ?? 2, 1, 4);
+            WinlockShieldMinSignalsForSoft = Math.Clamp(dto.WinlockShieldMinSignalsForSoft ?? 2, 1, 4);
+            if (dto.WinlockShieldWhitelist is not null)
+            {
+                WinlockShieldWhitelist = dto.WinlockShieldWhitelist
+                    .Where(e => !string.IsNullOrWhiteSpace(e.Path) || !string.IsNullOrWhiteSpace(e.Hash))
+                    .Select(e => new WinlockWhitelistEntry
+                    {
+                        Path = e.Path,
+                        Hash = e.Hash,
+                        Publisher = e.Publisher,
+                        Reason = e.Reason,
+                        AddedBy = e.AddedBy,
+                        AddedAt = e.AddedAt,
+                    })
+                    .ToList();
+            }
 
             // 3.0.0.23: Анти-майнер — выключен по умолчанию (нулевая нагрузка:
             // при выключении не создаются ни поллинг сетевых таблиц, ни ETW-подписка).
@@ -1420,7 +1513,8 @@ public sealed class JsonConfiguration : IConfiguration
                 ? DefaultUpdateServer()
                 : dto.UpdateServer;
             UpdateDatabaseAutomatically = dto.UpdateDatabaseAutomatically ?? true;
-            AutoUpdateIntervalHours = Math.Clamp(dto.AutoUpdateIntervalHours ?? 8, 1, 168);
+            // 3.0.1.6 (требование A2): автообновление НЕ чаще 2 раз в день — минимум 12 часов.
+            AutoUpdateIntervalHours = Math.Clamp(dto.AutoUpdateIntervalHours ?? 12, 12, 168);
             AutoUpdateThreatFeeds = dto.AutoUpdateThreatFeeds ?? true;
             AutoUpdateMinerLists = dto.AutoUpdateMinerLists ?? true;
 
@@ -1461,7 +1555,12 @@ public sealed class JsonConfiguration : IConfiguration
         }
         catch (JsonException)
         {
-            // Повреждённый конфиг — откат на значения по умолчанию (без потери файла).
+            // 3.0.1.6 (требование 4.1): повреждённый конфиг — НЕ перегенерируем молча.
+            // Эталон (config.json.snapshot) уже пробовали применить выше; если и он
+            // недоступен/повреждён — работаем на дефолтах В ПАМЯТИ, файл НЕ перезаписываем
+            // (сохраняем улику и не теряем настройки пользователя).
+            WriteConfigDiag("CONFIG-GUARD: config.json повреждён (JsonException) — эталон недоступен; " +
+                            "дефолты в памяти, файл не перезаписываем.");
             ApplyDefaults();
         }
     }
@@ -1608,6 +1707,22 @@ public sealed class JsonConfiguration : IConfiguration
             WinlockRenameIsolation = WinlockRenameIsolation,
             WinlockKillProcess = WinlockKillProcess,
             WinlockDesktopZone = WinlockDesktopZone,
+            WinlockShieldEnabled = WinlockShieldEnabled,
+            WinlockShieldPollMs = WinlockShieldPollMs,
+            WinlockShieldAutoKill = WinlockShieldAutoKill,
+            WinlockShieldRestoreExplorer = WinlockShieldRestoreExplorer,
+            WinlockShieldKillParent = WinlockShieldKillParent,
+            WinlockShieldMinSignals = WinlockShieldMinSignals,
+            WinlockShieldMinSignalsForSoft = WinlockShieldMinSignalsForSoft,
+            WinlockShieldWhitelist = WinlockShieldWhitelist.Select(e => new WinlockWhitelistEntryDto
+            {
+                Path = e.Path,
+                Hash = e.Hash,
+                Publisher = e.Publisher,
+                Reason = e.Reason,
+                AddedBy = e.AddedBy,
+                AddedAt = e.AddedAt,
+            }).ToList(),
             AntiMinerEnabled = AntiMinerEnabled,
             AntiMinerSensitivity = AntiMinerSensitivity,
             AntiMinerPollMs = AntiMinerPollMs,
@@ -1765,6 +1880,18 @@ public sealed class JsonConfiguration : IConfiguration
             // Страж не критичен для сохранения; без него подмена просто не будет замечена.
         }
 
+        // 3.0.1.6 (требование 4.1): эталон последнего корректного конфига — для отката
+        // при усечении/повреждении файла. Save() всегда пишет ПОЛНЫЙ набор ключей,
+        // поэтому эталон всегда полный (в отличие от возможной частичной записи на диск).
+        try
+        {
+            File.WriteAllText(_configFilePath + ".snapshot", json);
+        }
+        catch
+        {
+            // Эталон не критичен для сохранения.
+        }
+
         // Временная диагностика 3.0.0.7/3.0.0.32: кто и с каким значением пишет ключевые
         // свитчи (MonitorAutoStart, MonitorProcessExecution). Помогает найти источник
         // сброса настроек после перезапуска (например, служба перезаписывает конфиг
@@ -1845,7 +1972,7 @@ public sealed class JsonConfiguration : IConfiguration
         PreScanCheckMetadata = true;
         PreScanCheckNetwork = true;
         PreScanTrustedPublishers = DefaultTrustedPublishers;
-        PreScanSuspiciousFolders = "%TEMP%;%ProgramData%;C:\\Users\\Public";
+        PreScanSuspiciousFolders = "%TEMP%;%ProgramData%;C:\\Users\\Public;%USERPROFILE%\\Desktop;%USERPROFILE%\\Downloads;%USERPROFILE%\\Documents";
         PreScanTrustedLocalRoots = DefaultTrustedLocalRoots();
         PreScanEntropyLimit = 7.5;
         EntropyMonitorEnabled = false;
@@ -1907,6 +2034,14 @@ public sealed class JsonConfiguration : IConfiguration
         WinlockRenameIsolation = true;
         WinlockKillProcess = true;
         WinlockDesktopZone = true;
+        WinlockShieldEnabled = true;
+        WinlockShieldPollMs = 500;
+        WinlockShieldAutoKill = true;
+        WinlockShieldRestoreExplorer = true;
+        WinlockShieldKillParent = true;
+        WinlockShieldMinSignals = 2;
+        WinlockShieldMinSignalsForSoft = 2;
+        WinlockShieldWhitelist = new List<WinlockWhitelistEntry>();
         AmsiEnabled = false;
         AmsiFailSafeEnabled = true;
         AmsiDebugLog = false;
@@ -1958,7 +2093,7 @@ public sealed class JsonConfiguration : IConfiguration
         VirusAlertTrayEnabled = true;
         UpdateServer = DefaultUpdateServer();
         UpdateDatabaseAutomatically = true;
-        AutoUpdateIntervalHours = 8;
+        AutoUpdateIntervalHours = 12;
         RunOnStartup = false;
         MaxLogSizeMb = 5;
     }
@@ -2146,6 +2281,95 @@ public sealed class JsonConfiguration : IConfiguration
         catch
         {
             return false;
+        }
+    }
+
+    /// <summary>
+    /// 3.0.1.6 (требование 4.1): откат к эталону последнего корректного конфига
+    /// (config.json.snapshot), если текущий файл усечён (частичная запись) или повреждён
+    /// (не разбирается). Возвращает true, если эталон применён (файл восстановлен).
+    /// </summary>
+    private bool TryRestoreFromSnapshot(string currentRawText, out string restoredText)
+    {
+        restoredText = currentRawText;
+        try
+        {
+            var snapshotPath = _configFilePath + ".snapshot";
+            if (!File.Exists(snapshotPath))
+            {
+                return false;
+            }
+
+            var snapshotText = File.ReadAllText(snapshotPath);
+            var snapProps = CountTopLevelProperties(snapshotText);
+            if (snapProps <= 0)
+            {
+                return false; // эталон сам не разбирается — не используем
+            }
+
+            var curProps = CountTopLevelProperties(currentRawText);
+            // curProps < 0 — файл не разбирается (повреждён); иначе — усечён (ключей заметно меньше).
+            if (curProps >= 0 && curProps >= snapProps * 0.7)
+            {
+                return false; // конфиг выглядит целым — не трогаем
+            }
+
+            WriteConfigDiag(
+                $"CONFIG-GUARD: config.json {(curProps < 0 ? "повреждён" : "усечён")} " +
+                $"({curProps} ключей против {snapProps} в эталоне) — откат к эталону config.json.snapshot.");
+            try
+            {
+                File.Copy(snapshotPath, _configFilePath, overwrite: true);
+            }
+            catch
+            {
+                // Файл может быть заблокирован — работаем с эталоном в памяти.
+            }
+            restoredText = snapshotText;
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Число ключей верхнего уровня в JSON-объекте; -1 — не разбирается/не объект.</summary>
+    private static int CountTopLevelProperties(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                return -1;
+            }
+            var count = 0;
+            foreach (var _ in doc.RootElement.EnumerateObject())
+            {
+                count++;
+            }
+            return count;
+        }
+        catch
+        {
+            return -1;
+        }
+    }
+
+    /// <summary>Диагностика конфига (config_diag.log) — не должна ломать загрузку.</summary>
+    private static void WriteConfigDiag(string message)
+    {
+        try
+        {
+            var logDir = Path.Combine(AppPaths.AppDataDirectory, "logs");
+            Directory.CreateDirectory(logDir);
+            File.AppendAllText(Path.Combine(logDir, "config_diag.log"),
+                $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] {message}{Environment.NewLine}");
+        }
+        catch
+        {
+            // Диагностика не критична.
         }
     }
 
