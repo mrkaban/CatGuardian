@@ -734,8 +734,18 @@ public sealed class PortListenerActionDto
 /// </summary>
 public sealed class WinlockAlertDto
 {
-    /// <summary>Уникальный ключ алерта (дедупликация + возвращается в действии панели).</summary>
+    /// <summary>Уникальный ключ алерта (дедупликация + возвращается в действии панели).
+    /// 3.0.1.6 (P1-3): для WinlockShield-алерта — префикс «winlock_shield:<pid>:<path>»,
+    /// чтобы служба отличала его от старого AutoStart-Winlock.</summary>
     public string ActionKey { get; set; } = "";
+
+    /// <summary>3.0.1.6 (P1-3): PID процесса-баннера (WinlockShield). Для старого
+    /// AutoStart-Winlock не заполняется (0).</summary>
+    public int Pid { get; set; }
+
+    /// <summary>3.0.1.6 (P1-3): путь процесса-баннера (WinlockShield) — дублирует FilePath,
+    /// но извлекается ParsePayload'ом очереди алертов (camelCase «processPath»).</summary>
+    public string ProcessPath { get; set; } = "";
 
     /// <summary>Исходный путь к исполняемому файлу (до изоляции).</summary>
     public string FilePath { get; set; } = "";
@@ -765,6 +775,10 @@ public sealed class WinlockAlertDto
     /// <summary>Файл переименован в .bak.</summary>
     public bool FileRenamed { get; set; }
 
+    /// <summary>P15: изоляция выполнена КАРАНТИНОМ (зашифрованная .cgq-копия), а не .bak.
+    /// Окно показывает «Файл перемещён в карантин» вместо «переименован в .bak».</summary>
+    public bool IsQuarantined { get; set; }
+
     /// <summary>Запись автозагрузки удалена.</summary>
     public bool EntryDeleted { get; set; }
 
@@ -791,6 +805,12 @@ public enum WinlockActionKind
     RestoreAndTrust = 0,
     /// <summary>Оставить элемент изолированным (файл .bak, запись удалена).</summary>
     KeepIsolated = 1,
+    /// <summary>3.0.1.6 (P1-3): WinlockShield — «Добавить в доверенные»: внести путь/хэш
+    /// в WinlockShieldWhitelist и восстановить файл из карантина (.cgq → исходный путь).</summary>
+    TrustAndRestore = 2,
+    /// <summary>3.0.1.6 (P1-3): WinlockShield — «Удалить файл»: безвозвратно удалить
+    /// карантинную копию (.cgq) и метаданные.</summary>
+    DeleteFile = 3,
 }
 
 /// <summary>Решение панели по алерту Winlock Protection (3.0.0.20).</summary>
@@ -1220,6 +1240,11 @@ public sealed class SandboxAlertDto
     /// <summary>Имя процесса.</summary>
     public string ProcessName { get; set; } = "";
 
+    /// <summary>P23 (КРИТИЧЕСКОЕ): время создания процесса (UTC) — для PID-reuse сверки при
+    /// «Завершить» (KillForced с expectedStartUtc). Без неё KillForced(pid) убивал ЛЮБОЙ
+    /// процесс с этим PID (переиспользованный легитимный), т.к. MatchesIdentity(null) = true.</summary>
+    public System.DateTime StartTimeUtc { get; set; }
+
     /// <summary>Путь к исполняемому файлу.</summary>
     public string ProcessPath { get; set; } = "";
 
@@ -1263,6 +1288,10 @@ public sealed class SandboxActionDto
 
     /// <summary>PID процесса (для KillProcess / LaunchInSandbox).</summary>
     public int Pid { get; set; }
+
+    /// <summary>P23 (КРИТИЧЕСКОЕ): время создания процесса (UTC) из алерта — для PID-reuse
+    /// сверки при KillProcess (KillForced с expectedStartUtc).</summary>
+    public System.DateTime StartTimeUtc { get; set; }
 
     /// <summary>Путь exe (для LaunchInSandbox / ManualLaunch / TrustPath).</summary>
     public string ProcessPath { get; set; } = "";
