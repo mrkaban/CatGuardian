@@ -58,9 +58,12 @@ public sealed class InteractiveAlertQueue : IDisposable
     }
 
     private static readonly TimeSpan RetryInterval = TimeSpan.FromSeconds(10);
-    /// <summary>Таймаут авто-решения AntiStealer/Sandbox/Winlock (B1.4).</summary>
-    private static readonly TimeSpan AutoResolveTimeout = TimeSpan.FromSeconds(120);
-    /// <summary>Человекочитаемый текст таймаута для логов («~120 с»).</summary>
+    /// <summary>Таймаут авто-решения AntiStealer/Sandbox/Winlock (B1.4).
+    /// 3.0.1.6 (требование 3.4): снижен 120 → 45 с — при недоступной панели служба должна
+    /// применить Kill сама, а не оставлять вирус замороженным/живым (в логах VM песочница
+    /// видела вирус, но авто-резолв «failed to terminate» и дедуп оставляли его живым).</summary>
+    private static readonly TimeSpan AutoResolveTimeout = TimeSpan.FromSeconds(45);
+    /// <summary>Человекочитаемый текст таймаута для логов («~45 с»).</summary>
     public static string AutoResolveTimeoutText => $"~{AutoResolveTimeout.TotalSeconds:0} с";
     private static readonly TimeSpan PanelSpawnCooldown = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan PanelStartupWait = TimeSpan.FromSeconds(15);
@@ -86,11 +89,14 @@ public sealed class InteractiveAlertQueue : IDisposable
     private readonly Action<AlertEntry> _autoResolveAction;
 
     /// <summary>
-    /// Запрос баллуна хосту трея (push alert): (kind, title, text). kind нужен хосту,
-    /// чтобы различать «требует решения» (POPUP при закрытой панели) и информационные
-    /// виды (например, PrivacyShieldAlert — только баллун, 3.0.0.63).
+    /// Запрос баллуна/POPUP хосту трея (push alert): (kind, title, text, actionKey, pid, processPath).
+    /// kind нужен хосту, чтобы различать «требует решения» (POPUP при закрытой панели) и
+    /// информационные виды (например, PrivacyShieldAlert — только баллун, 3.0.0.63).
+    /// 3.0.1.6 (требование 3.4): actionKey/pid/processPath передаются хосту, чтобы POPUP
+    /// решения (Sandbox/Spyware/AntiStealer/Winlock) мог отправить выбор пользователя
+    /// обратно службе командой alert_action.
     /// </summary>
-    public event Action<IpcProtocol.MessageKind, string, string>? AlertBalloonRequested;
+    public event Action<IpcProtocol.MessageKind, string, string, string, int, string>? AlertBalloonRequested;
 
     /// <summary>
     /// 3.0.0.93: алерт снят службой (стал неактуален) — хост трея закрывает
@@ -215,9 +221,25 @@ public sealed class InteractiveAlertQueue : IDisposable
 
             if (added)
             {
+                // P15: единая дедупликация Winlock-алертов по пути файла — POPUP и окно
+                // панели не должны дублироваться (ВМ 19.10: 10-12 одинаковых алертов,
+                // кулдаун трейхоста сбрасывался при перезапуске хоста). Один файл = одно
+                // уведомление в 10 минут, независимо от канала.
+                if (kind == IpcProtocol.MessageKind.WinlockAlert)
+                {
+                    var winlockPath = ExtractWinlockPath(data);
+                    if (WinlockAlertDedup.ShouldSuppress(winlockPath))
+                    {
+                        GuardianLog.Info(
+                            $"ALERT-QUEUE: Winlock-алерт для '{winlockPath}' подавлен единой дедупликацией (уже показан).");
+                        return true;
+                    }
+                }
+
                 GuardianLog.Warning(
                     $"ALERT-QUEUE: интерактивный алерт {kind} ({actionKey}) взят в очередь (панель недоступна).");
-                AlertBalloonRequested?.Invoke(kind, "Cat Guardian", AlertBalloonText(kind, data));
+                AlertBalloonRequested?.Invoke(kind, "Cat Guardian", AlertBalloonText(kind, data),
+                    actionKey, pid, processPath);
                 _ = Task.Run(() => EnsureDeliveredAsync(entry));
             }
 
@@ -276,6 +298,18 @@ public sealed class InteractiveAlertQueue : IDisposable
                 await Task.Delay(500);
             }
 
+            // P17: повторная проверка единой дедупликации ПЕРЕД доставкой — ретрай того же
+            // Winlock-алерта не должен открывать НОВОЕ окно (ВМ 21.10: «доставлен панели
+            // (ретрай)» ×2 → 2–3 одинаковых окна). Один инцидент = одно окно.
+            if (entry.Kind == IpcProtocol.MessageKind.WinlockAlert
+                && WinlockAlertDedup.ShouldSuppress(ExtractWinlockPath(entry.Data)))
+            {
+                GuardianLog.Info(
+                    $"ALERT-QUEUE: Winlock-алерт '{ExtractWinlockPath(entry.Data)}' подавлен дедупликацией при доставке (уже показан).");
+                RemoveIfCurrent(entry.ActionKey);
+                return;
+            }
+
             // Расширенное окно retry (B8): перекрывает холодный старт WPF-панели.
             if (PanelPipeClient.TrySendRetry(entry.Kind, entry.Data, attempts: 20, baseDelayMs: 250))
             {
@@ -317,6 +351,17 @@ public sealed class InteractiveAlertQueue : IDisposable
             {
                 try
                 {
+                    // P17: повторная проверка дедупликации на каждом ретрае — иначе тот же
+                    // Winlock-алерт открывает новое окно при каждом «доставлен (ретрай)».
+                    if (entry.Kind == IpcProtocol.MessageKind.WinlockAlert
+                        && WinlockAlertDedup.ShouldSuppress(ExtractWinlockPath(entry.Data)))
+                    {
+                        GuardianLog.Info(
+                            $"ALERT-QUEUE: Winlock-алерт '{ExtractWinlockPath(entry.Data)}' подавлен дедупликацией при ретрае (уже показан).");
+                        RemoveIfCurrent(entry.ActionKey);
+                        continue;
+                    }
+
                     // ВАЖНО: доставка через TrySendRetry с малым числом попыток — не блокируем
                     // тик надолго; расширенный retry (со спавном) был в EnsureDeliveredAsync.
                     if (_deliverNow(entry.Kind, entry.Data))
@@ -403,6 +448,24 @@ public sealed class InteractiveAlertQueue : IDisposable
         }
     }
 
+    /// <summary>
+    /// 3.0.1.6 (требование 3.4): пользователь принял решение в POPUP хоста трея
+    /// (панель недоступна) — убираем запись из очереди, чтобы страховочный авто-резолв
+    /// не переопределил решение пользователя. Возвращает true, если запись была снята.
+    /// </summary>
+    public bool RemoveByActionKey(string actionKey)
+    {
+        if (string.IsNullOrEmpty(actionKey))
+        {
+            return false;
+        }
+
+        lock (_sync)
+        {
+            return _queue.Remove(actionKey);
+        }
+    }
+
     // ---------------------------------------------------------------
     // Разбор payload'а
     // ---------------------------------------------------------------
@@ -445,6 +508,24 @@ public sealed class InteractiveAlertQueue : IDisposable
         }
 
         return (actionKey, pid, processPath, autoResolve);
+    }
+
+    /// <summary>P15: извлекает FilePath из JSON WinlockAlertDto (для единой дедупликации
+    /// POPUP/окна по пути файла). Пусто при ошибке разбора — дедупликация не сработает,
+    /// но алерт не потеряется.</summary>
+    private static string ExtractWinlockPath(string? data)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(data)) return "";
+            using var doc = System.Text.Json.JsonDocument.Parse(data);
+            if (doc.RootElement.TryGetProperty("filePath", out var fp))
+            {
+                return fp.GetString() ?? "";
+            }
+        }
+        catch { /* некорректный JSON */ }
+        return "";
     }
 
     private static string AlertBalloonText(IpcProtocol.MessageKind kind, string? data)

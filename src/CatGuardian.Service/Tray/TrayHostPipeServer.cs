@@ -56,6 +56,30 @@ public sealed class TrayHostPipeServer : IDisposable
     /// Возвращает "" при принятии, текст ошибки — при отказе (модуль выключен и т.п.).</summary>
     public Func<string, string, string, string>? ClipboardAlertHandler;
 
+    /// <summary>
+    /// 3.0.1.6 (требование 3.4): решение пользователя из POPUP хоста трея, когда панель
+    /// недоступна (кнопки «Завершить» / «В песочницу» / «Разморозить»). Аргументы:
+    /// (alertKind, actionKey, pid, processPath, action) → "" при успехе, текст ошибки при отказе.
+    /// </summary>
+    public Func<int, string, int, string, string, string>? AlertActionHandler;
+
+    /// <summary>
+    /// 3.0.1.6 (P0 3.7): winlock_detected от per-session агента TrayHost (HARD signal —
+    /// Explorer убит + (BlockInput ИЛИ topmost)). Аргументы: (pid, processPath, explorerMissing,
+    /// taskbarHidden, sessionId, hwnd, signals) → "" при принятии, текст ошибки при отказе.
+    /// Kill/карантин/восстановление Explorer выполняет служба SYSTEM.
+    /// </summary>
+    public Func<int, string, bool, bool, int, long, int, string>? WinlockDetectedHandler;
+
+    /// <summary>3.0.1.6 (P0 3.7): winlock_soft — SOFT signal (предупреждение, без kill).</summary>
+    public Func<int, string, bool, bool, int, long, int, string>? WinlockSoftHandler;
+
+    /// <summary>3.0.1.6 (P0 3.7): heartbeat от TrayHost (каждые 3 с) — трекер живости агента.</summary>
+    public Action<int, int>? HeartbeatHandler;
+
+    /// <summary>3.0.1.6 (P0 3.7): trayhost_ready — агент инициализирован и готов принимать push.</summary>
+    public Action<int, int, string>? TrayHostReadyHandler;
+
     /// <summary>exit: штатная остановка комплекса.</summary>
     public Action? ExitHandler;
 
@@ -63,6 +87,19 @@ public sealed class TrayHostPipeServer : IDisposable
     public Func<string>? StatusHandler;
 
     private Thread? _loopThread;
+
+    // P14: выделенный поток обработки winlock_detected/winlock_soft. Task.Run на общем пуле
+    // задерживался на 2,5 мин, когда пул забит clamscan-батчами (ВМ 19.10: HARD 10:13:56 →
+    // kill 10:16:28). Выделенный поток обрабатывает детекты немедленно, независимо от пула.
+    private sealed record WinlockTask(
+        Func<int, string, bool, bool, int, long, int, string> Handler,
+        int Pid, string Path, bool ExplorerMissing, bool TaskbarHidden,
+        int SessionId, long Hwnd, int Signals);
+    private readonly object _winlockSync = new();
+    private readonly List<WinlockTask> _winlockQueue = new();
+    private readonly SemaphoreSlim _winlockSignal = new(0, int.MaxValue);
+    private volatile bool _winlockClosed;
+    private Thread? _winlockThread;
 
     public void Start()
     {
@@ -81,6 +118,45 @@ public sealed class TrayHostPipeServer : IDisposable
             Name = "TrayHostPipeAccept",
         };
         _loopThread.Start();
+
+        // P14: выделенный поток winlock-обработки (блокирующая очередь на SemaphoreSlim) —
+        // не зависит от пула потоков, забитого clamscan-батчами.
+        _winlockThread = new Thread(() =>
+        {
+            while (true)
+            {
+                try { _winlockSignal.Wait(); }
+                catch { break; } // семафор закрыт при Dispose
+                WinlockTask? task = null;
+                lock (_winlockSync)
+                {
+                    if (_winlockQueue.Count > 0)
+                    {
+                        task = _winlockQueue[0];
+                        _winlockQueue.RemoveAt(0);
+                    }
+                }
+                if (task is null)
+                {
+                    if (_winlockClosed) break;
+                    continue;
+                }
+                try
+                {
+                    task.Handler(task.Pid, task.Path, task.ExplorerMissing,
+                        task.TaskbarHidden, task.SessionId, task.Hwnd, task.Signals);
+                }
+                catch (Exception ex)
+                {
+                    GuardianLog.Warning("TRAYHOST-IPC: winlock-обработка упала: " + ex.Message);
+                }
+            }
+        })
+        {
+            IsBackground = true,
+            Name = "TrayHostWinlockWorker",
+        };
+        _winlockThread.Start();
     }
 
     // ---------------------------------------------------------------
@@ -117,7 +193,8 @@ public sealed class TrayHostPipeServer : IDisposable
     /// хост по нему решает, показывать ли POPUP (алерт требует решения) или только
     /// баллун (информационные виды, например PrivacyShieldAlert).
     /// </summary>
-    public void PushAlert(string title, string text, int? alertKind = null)
+    public void PushAlert(string title, string text, int? alertKind = null,
+        string? actionKey = null, int pid = 0, string? processPath = null)
     {
         var payload = JsonSerializer.Serialize(new Dictionary<string, object?>
         {
@@ -125,6 +202,11 @@ public sealed class TrayHostPipeServer : IDisposable
             ["title"] = title,
             ["text"] = text,
             ["alertKind"] = alertKind,
+            // 3.0.1.6 (требование 3.4): данные для кнопок решения POPUP хоста трея
+            // (панель недоступна) — «Завершить» / «В песочницу» / «Разморозить».
+            ["actionKey"] = actionKey,
+            ["pid"] = pid,
+            ["processPath"] = processPath,
         }, IpcProtocol.JsonOptions);
         Push(payload);
     }
@@ -341,6 +423,143 @@ public sealed class TrayHostPipeServer : IDisposable
                     return Reply(id, string.IsNullOrEmpty(err), err);
                 }
 
+                case "alert_action":
+                {
+                    // 3.0.1.6 (требование 3.4): решение пользователя из POPUP хоста трея
+                    // (панель недоступна) — «Завершить» / «В песочницу» / «Разморозить».
+                    var alertKind = root.TryGetProperty("alertKind", out var akEl) &&
+                                    akEl.ValueKind == JsonValueKind.Number &&
+                                    akEl.TryGetInt32(out var akv)
+                        ? akv
+                        : 0;
+                    var actionKey = root.TryGetProperty("actionKey", out var keyEl) ? keyEl.GetString() ?? "" : "";
+                    var pid = root.TryGetProperty("pid", out var pidEl) &&
+                              pidEl.ValueKind == JsonValueKind.Number &&
+                              pidEl.TryGetInt32(out var pidv)
+                        ? pidv
+                        : 0;
+                    var processPath = root.TryGetProperty("processPath", out var ppEl) ? ppEl.GetString() ?? "" : "";
+                    var action = root.TryGetProperty("action", out var actEl) ? actEl.GetString() ?? "" : "";
+                    if (string.IsNullOrEmpty(action))
+                    {
+                        return Reply(id, false, "invalid_payload");
+                    }
+
+                    var actionErr = AlertActionHandler?.Invoke(alertKind, actionKey, pid, processPath, action)
+                                    ?? "service_unavailable";
+                    return Reply(id, string.IsNullOrEmpty(actionErr), actionErr);
+                }
+
+                case "winlock_detected":
+                case "winlock_soft":
+                {
+                    // 3.0.1.6 (P0 3.7): детект блокировки экрана от per-session агента TrayHost.
+                    var pid = root.TryGetProperty("pid", out var pidEl) &&
+                              pidEl.ValueKind == JsonValueKind.Number &&
+                              pidEl.TryGetInt32(out var pidv)
+                        ? pidv
+                        : 0;
+                    var processPath = root.TryGetProperty("processPath", out var ppEl) ? ppEl.GetString() ?? "" : "";
+                    var explorerMissing = root.TryGetProperty("explorerMissing", out var emEl) &&
+                                          emEl.ValueKind == JsonValueKind.True;
+                    // P3-2: таскбар скрыт в сессии (проверка TrayHost) — для решения о
+                    // перезапуске Explorer (собственная проверка службы из session 0 не видит
+                    // окна session 1). Старые агенты не шлют поле → false.
+                    var taskbarHidden = root.TryGetProperty("taskbarHidden", out var tbEl) &&
+                                        tbEl.ValueKind == JsonValueKind.True;
+                    var sessionId = root.TryGetProperty("sessionId", out var sidEl) &&
+                                    sidEl.ValueKind == JsonValueKind.Number &&
+                                    sidEl.TryGetInt32(out var sidv)
+                        ? sidv
+                        : 0;
+                    var hwnd = root.TryGetProperty("hwnd", out var hwEl) &&
+                               hwEl.ValueKind == JsonValueKind.Number &&
+                               hwEl.TryGetInt64(out var hwv)
+                        ? hwv
+                        : 0L;
+                    var signals = root.TryGetProperty("signals", out var sigEl) &&
+                                  sigEl.ValueKind == JsonValueKind.Number &&
+                                  sigEl.TryGetInt32(out var sigv)
+                        ? sigv
+                        : 0;
+
+                    if (pid <= 0)
+                    {
+                        return Reply(id, false, "invalid_payload");
+                    }
+
+                    // P4-F: замер времени обработки — эскалация SOFT→kill в ВМ3 задерживалась
+                    // на ~46 с (11:34:56 → 11:35:42) при перегрузке сканера
+                    // («СТРАЖ: конвейер молчит 132-228 с»). Тайминг >50 мс пишем в лог.
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    // P11-C (3.0.1.6-p11): обработка детекта — в ФОНЕ (Task.Run). Kill баннера
+                    // не должен ждать IPC-очередь и не должен блокировать другие сообщения
+                    // (ВМ4 18.10: HARD 10:16:44 → kill 10:17:23 — 39 с при перегрузке службы
+                    // ClamAV-очередью). TrayHost получает «accepted» сразу.
+                    var handler = cmd == "winlock_detected" ? WinlockDetectedHandler : WinlockSoftHandler;
+                    if (handler is null)
+                    {
+                        return Reply(id, false, "service_unavailable");
+                    }
+                    var hPid = pid; var hPath = processPath; var hEm = explorerMissing;
+                    var hTh = taskbarHidden; var hSid = sessionId; var hHwnd = hwnd; var hSig = signals;
+                    // P14: обработка на ВЫДЕЛЕННОМ потоке (не Task.Run) — пул может быть забит
+                    // clamscan-батчами, и Task.Run задерживал kill на 2,5 мин (ВМ 19.10).
+                    lock (_winlockSync)
+                    {
+                        if (_winlockClosed)
+                        {
+                            return Reply(id, false, "service_unavailable");
+                        }
+                        _winlockQueue.Add(new WinlockTask(
+                            handler, hPid, hPath, hEm, hTh, hSid, hHwnd, hSig));
+                    }
+                    _winlockSignal.Release();
+                    sw.Stop();
+                    if (sw.ElapsedMilliseconds > 50)
+                    {
+                        GuardianLog.Warning(
+                            $"TRAYHOST-IPC: {cmd} принят за {sw.ElapsedMilliseconds} мс (pid={pid}) — обработка в фоне.");
+                    }
+                    return Reply(id, true, "accepted");
+                }
+
+                case "heartbeat":
+                {
+                    // 3.0.1.6 (P0 3.7): heartbeat per-session агента (каждые 3 с).
+                    var sessionId = root.TryGetProperty("sessionId", out var sidEl) &&
+                                    sidEl.ValueKind == JsonValueKind.Number &&
+                                    sidEl.TryGetInt32(out var sidv)
+                        ? sidv
+                        : 0;
+                    var pid = root.TryGetProperty("pid", out var pidEl) &&
+                              pidEl.ValueKind == JsonValueKind.Number &&
+                              pidEl.TryGetInt32(out var pidv)
+                        ? pidv
+                        : 0;
+                    try { HeartbeatHandler?.Invoke(sessionId, pid); }
+                    catch (Exception ex) { GuardianLog.Warning("TRAYHOST-IPC: heartbeat: " + ex.Message); }
+                    return Reply(id, true, "");
+                }
+
+                case "trayhost_ready":
+                {
+                    var sessionId = root.TryGetProperty("sessionId", out var sidEl) &&
+                                    sidEl.ValueKind == JsonValueKind.Number &&
+                                    sidEl.TryGetInt32(out var sidv)
+                        ? sidv
+                        : 0;
+                    var pid = root.TryGetProperty("pid", out var pidEl) &&
+                              pidEl.ValueKind == JsonValueKind.Number &&
+                              pidEl.TryGetInt32(out var pidv)
+                        ? pidv
+                        : 0;
+                    var version = root.TryGetProperty("version", out var vEl) ? vEl.GetString() ?? "" : "";
+                    try { TrayHostReadyHandler?.Invoke(sessionId, pid, version); }
+                    catch (Exception ex) { GuardianLog.Warning("TRAYHOST-IPC: trayhost_ready: " + ex.Message); }
+                    return Reply(id, true, "");
+                }
+
                 default:
                     GuardianLog.Warning($"TRAYHOST-IPC: неизвестная команда '{cmd}' — отказ.");
                     return Reply(id, false, "unknown_command");
@@ -463,6 +682,10 @@ public sealed class TrayHostPipeServer : IDisposable
     {
         _cts.Cancel();
         try { _loopThread?.Join(2000); } catch { /* ignore */ }
+        // P14: закрываем очередь winlock-воркера и ждём его завершения.
+        _winlockClosed = true;
+        try { _winlockSignal.Release(); } catch { /* ignore */ }
+        try { _winlockThread?.Join(2000); } catch { /* ignore */ }
         _cts.Dispose();
         lock (_clientsSync)
         {
