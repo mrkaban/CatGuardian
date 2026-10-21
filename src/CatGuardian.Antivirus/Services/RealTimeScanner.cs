@@ -36,6 +36,13 @@ public sealed class RealTimeScanner : IDisposable
     private readonly CancellationTokenSource _cts = new();
     private readonly Task _worker;
     private bool _disposed;
+    // 3.0.1.6 (требование A): момент последнего успешно завершённого скана — страж
+    // AntivirusRunner (OnScannerGuardTick) по нему определяет, «тихо ли стоит» конвейер.
+    private DateTime _lastScanCompletedUtc = DateTime.UtcNow;
+    // P15: момент НАЧАЛА последнего скана батча. СТРАЖ использует его, чтобы НЕ
+    // пересоздавать сканер, пока батч в полёте (на clamscan батч легитимно занимает
+    // 2,5 мин — «СТРАЖ: конвейер молчит» срабатывал и запускал ПАРАЛЛЕЛЬНЫЙ clamscan).
+    private DateTime _lastScanStartedUtc = DateTime.UtcNow;
 
     // 3.0.0.23: происхождение очереди для burst-режима clamd. Пути, поставленные
     // ФОНОВЫМ досмотром (SweepRecentlyModified), не считаются реальной активностью:
@@ -132,6 +139,12 @@ public sealed class RealTimeScanner : IDisposable
     // вечно дописываемый файл всё равно сканируется (иначе остался бы необнаруженным).
     private readonly Dictionary<string, DateTime> _hotSince = new(StringComparer.OrdinalIgnoreCase);
     private static readonly TimeSpan StableWindow = TimeSpan.FromSeconds(2);
+
+    // P19 (Q2): LastWriteTimeUtc на момент последнего скана пути. Повторный скан
+    // выполняется ТОЛЬКО если файл ИЗМЕНИЛСЯ после этого — иначе RetryWindow (6 с)
+    // пересканировал бы каждый стабильный файл 12–20 раз (цикл воркера ~200 мс +
+    // скан clamd ~0.3–0.5 с) → CPU-шторм clamd (ВМ 21.10: clamd 46–73%, служба 12–25%).
+    private readonly Dictionary<string, DateTime> _lastScannedWriteUtc = new(StringComparer.OrdinalIgnoreCase);
     private static readonly TimeSpan HotMaxWait = TimeSpan.FromSeconds(30);
 
     /// <summary>
@@ -306,26 +319,33 @@ public sealed class RealTimeScanner : IDisposable
     /// Rate-limit: один путь не чаще раза в 60 с (системные бинарники не
     /// пересканируются каждые 15 с). PID сохраняется для kill при детекте.
     /// </summary>
-    public void EnqueuePreScan(string path, int pid)
+    public void EnqueuePreScan(string path, int pid, bool isRiskZone = false)
     {
         if (string.IsNullOrWhiteSpace(path))
         {
             return;
         }
 
-        var now = DateTime.UtcNow;
-        if (_preScanLastUtc.TryGetValue(path, out var last) && now - last < PreScanMinInterval)
+        // 3.0.1.6 (требование C): rate-limit 60 с НЕ применяется к risk-зонам — повторные и
+        // мультипроцессные запуски вирусов обязаны сканироваться КАЖДЫЙ раз (в логах VM
+        // PreScan пропускал video_xxx.exe и маскирад explorer каждые 60 с).
+        if (!isRiskZone)
         {
-            if (now - _lastPreScanDiagUtc > TimeSpan.FromSeconds(5))
+            var now = DateTime.UtcNow;
+            if (_preScanLastUtc.TryGetValue(path, out var last) && now - last < PreScanMinInterval)
             {
-                _lastPreScanDiagUtc = now;
-                _logger?.Info(LogCategory.Realtime,
-                    $"Pre-Scan: пропущен (путь проверен {PreScanMinInterval.TotalSeconds:F0} с назад): {path}");
+                if (now - _lastPreScanDiagUtc > TimeSpan.FromSeconds(5))
+                {
+                    _lastPreScanDiagUtc = now;
+                    _logger?.Info(LogCategory.Realtime,
+                        $"Pre-Scan: пропущен (путь проверен {PreScanMinInterval.TotalSeconds:F0} с назад): {path}");
+                }
+                return;
             }
-            return;
+
+            _preScanLastUtc[path] = now;
         }
 
-        _preScanLastUtc[path] = now;
         _preScanPids[path] = pid;
         _realEventSeq[path] = Interlocked.Increment(ref _enqueueSeq);
         _priorityChannel.Writer.TryWrite(new FileChange(path, FileChangeKind.Modified));
@@ -342,6 +362,14 @@ public sealed class RealTimeScanner : IDisposable
     /// </summary>
     public bool HasPendingRealEvents()
         => _priorityChannel.Reader.TryPeek(out _) || _pending.Count > 0;
+
+    /// <summary>3.0.1.6 (требование A): момент последнего успешно завершённого скана
+    /// (обновляется в <see cref="HandleResultAsync"/> после фактического скана).</summary>
+    public DateTime LastScanCompletedUtc => _lastScanCompletedUtc;
+
+    /// <summary>P15: момент начала последнего скана батча (обновляется в
+    /// <see cref="ScanPendingBatch"/> перед вызовом сканера).</summary>
+    public DateTime LastScanStartedUtc => _lastScanStartedUtc;
 
     /// <summary>
     /// 3.0.1.4-fix (B1): добавляет событие в очередь ожидания. При переименовании
@@ -464,7 +492,7 @@ public sealed class RealTimeScanner : IDisposable
     /// в карантин (иначе движущийся исполняемый образ заблокирован ОС).
     /// </summary>
     public async Task<bool> HandleProcessLaunchAsync(
-        string path, int pid, CancellationToken ct = default)
+        string path, int pid, bool isRiskZone = false, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(path))
         {
@@ -486,21 +514,11 @@ public sealed class RealTimeScanner : IDisposable
             return false;
         }
 
-        // Уже проверенный чистый бинарник, не менявшийся — сканировать не нужно.
-        if (VerdictCache?.IsKnownClean(full) == true)
-        {
-            return false;
-        }
-
-        // Защита от параллельного сканирования одного пути.
-        if (!_scanning.TryAdd(full, 0))
-        {
-            return false;
-        }
-
+        // 3.0.1.6 (требование 3.3): мгновенный детект по известному SHA-256 (IsKnownInfected)
+        // выполняется ДО кэша «чистых» вердиктов и ДО постановки в очередь — повторный запуск
+        // карантинированного файла убивается ≤1 с, даже если VerdictCache помнит его «чистым».
         try
         {
-            // 3.0.0.17: мгновенный детект по известному SHA-256 — без запуска ClamAV.
             if (HashIndex is not null)
             {
                 var (found, knownName) = await HashIndex.TryLookupAsync(full, ct);
@@ -519,6 +537,20 @@ public sealed class RealTimeScanner : IDisposable
                     catch (OperationCanceledException)
                     {
                     }
+
+                    // P11-B (3.0.1.6-p11): файл мог остаться после kill (карантин позже
+                    // падает «НЕ УДАЛОСЬ ПЕРЕМЕСТИТЬ» — файл занят/уже удалён, ВМ4 18.10:
+                    // video_xxx.exe). Пробуем удалить сразу после завершения процесса.
+                    try
+                    {
+                        if (File.Exists(full))
+                        {
+                            File.SetAttributes(full, FileAttributes.Normal);
+                            File.Delete(full);
+                        }
+                    }
+                    catch { /* занят — карантин/повторный скан догонит */ }
+
                     VerdictCache?.MarkInfected(full);
                     var known = new ScanResult
                     {
@@ -529,14 +561,44 @@ public sealed class RealTimeScanner : IDisposable
                     return true;
                 }
             }
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _logger?.Error(LogCategory.Realtime, Tr.T("Svc2334") + ex.Message);
+            return false;
+        }
 
+        // 3.0.1.6 (требование C): для risk-зон НЕ полагаемся на кэш «чистого» вердикта
+        // (файл мог пересоздаться) и НЕ подавляем параллельный скан того же пути —
+        // мультипроцессный запуск вируса обязан сканироваться при каждом PID.
+        if (!isRiskZone)
+        {
+            // Уже проверенный чистый бинарник, не менявшийся — сканировать не нужно.
+            if (VerdictCache?.IsKnownClean(full) == true)
+            {
+                return false;
+            }
+
+            // Защита от параллельного сканирования одного пути.
+            if (!_scanning.TryAdd(full, 0))
+            {
+                return false;
+            }
+        }
+
+        try
+        {
             // 3.0.1.5-fix (E1): Pre-Scan НЕ вызывает сканер напрямую — иначе сетевая
             // эвристика (каждые ~15 с) монополизирует семафор ClamScanScanner холодным
             // clamscan (24-30 с на скан), а реальные события (Created/Renamed) голодают
             // в очереди минуты (в логах VM детект занял 12 минут). Файл ставится в
             // приоритетный канал — ScanPendingBatch обработает его батчем вместе с
             // watcher-событиями (реальные первыми). PID сохраняется для kill при детекте.
-            EnqueuePreScan(full, pid);
+            EnqueuePreScan(full, pid, isRiskZone);
             return false;
         }
         catch (OperationCanceledException)
@@ -545,8 +607,7 @@ public sealed class RealTimeScanner : IDisposable
         }
         catch (Exception ex)
         {
-            _logger?.Error(LogCategory.Realtime,
-                Tr.T("Svc2334") + ex.Message);
+            _logger?.Error(LogCategory.Realtime, Tr.T("Svc2334") + ex.Message);
             return false;
         }
         finally
@@ -620,6 +681,13 @@ public sealed class RealTimeScanner : IDisposable
         catch (System.Threading.Channels.ChannelClosedException)
         {
             // Штатное завершение при остановке.
+        }
+        catch (Exception ex)
+        {
+            // 3.0.1.6 (требование A): краш воркера не должен молча останавливать конвейер.
+            // Логируем ERROR и продолжаем цикл — накопленная очередь не теряется.
+            _logger?.Error(LogCategory.Realtime,
+                "Воркер сканера: ошибка цикла — продолжаю работу: " + ex.Message);
         }
     }
 
@@ -856,6 +924,16 @@ public sealed class RealTimeScanner : IDisposable
         // реальное перекрывает фоновую постановку того же файла.
         var realFiles = files.Count(IsRealEventPath);
 
+        // P19 (Q2): фиксируем LastWriteTimeUtc на момент скана — повторный скан
+        // только если файл ИЗМЕНИЛСЯ после этого (иначе стабильный файл
+        // пересканировался бы 12–20 раз за RetryWindow 6 с → CPU-шторм clamd).
+        var nowWrite = DateTime.UtcNow;
+        foreach (var f in files)
+        {
+            try { _lastScannedWriteUtc[f] = File.GetLastWriteTimeUtc(f); }
+            catch { _lastScannedWriteUtc.Remove(f); }
+        }
+
         try
         {
             // 3.0.0.17: файлы, уже известные по SHA-256, детектируются МГНОВЕННО —
@@ -921,6 +999,9 @@ public sealed class RealTimeScanner : IDisposable
             ScanResult result;
             if (filesToScan.Count > 0)
             {
+                // P15: фиксируем начало скана — СТРАЖ не должен пересоздавать сканер,
+                // пока батч в полёте (иначе параллельные clamscan на медленной машине).
+                _lastScanStartedUtc = DateTime.UtcNow;
                 // 3.0.0.56 (диагностика): первые пакеты с файлами в «горячих» каталогах
                 // пишут СЫРЫЕ строки вердикта движка — прямо отвечает, что сказал ClamAV
                 // по конкретному файлу (eicar.com: Eicar-Test-Signature FOUND), а не
@@ -1121,18 +1202,33 @@ public sealed class RealTimeScanner : IDisposable
             // Оставляем для повторного скана только существующие и «свежие» файлы;
             // остальные (обработанные/устаревшие) убираем из очереди и очищаем
             // маркеры происхождения (иначе словари росли бы бесконечно).
+            // P19 (Q2): повторный скан ТОЛЬКО если файл ИЗМЕНИЛСЯ с момента последнего
+            // скана (LastWriteTimeUtc вырос) — стабильный файл не пересканируется
+            // 12–20 раз за RetryWindow (CPU-шторм clamd, ВМ 21.10).
             var now = DateTime.UtcNow;
             foreach (var f in files)
             {
+                var changedSinceScan = false;
+                if (_lastScannedWriteUtc.TryGetValue(f, out var lastWrite))
+                {
+                    try { changedSinceScan = File.GetLastWriteTimeUtc(f) > lastWrite; }
+                    catch { changedSinceScan = true; } // файл занят/удалён — консервативно пересканируем
+                }
+                else
+                {
+                    changedSinceScan = true; // не сканировался в этом пакете — консервативно
+                }
                 var isFresh = File.Exists(f)
                               && _pending.TryGetValue(f, out var first)
-                              && now - first < RetryWindow;
+                              && now - first < RetryWindow
+                              && changedSinceScan;
                 if (!isFresh)
                 {
                     _pending.Remove(f);
                     _realEventSeq.TryRemove(f, out _);
                     _backgroundSeq.TryRemove(f, out _);
                     _hotSince.Remove(f);
+                    _lastScannedWriteUtc.Remove(f);
                 }
             }
 
@@ -1186,6 +1282,9 @@ public sealed class RealTimeScanner : IDisposable
 
         // Фактический скан выполнен (даже без детекций) — уведомляем о активности.
         ScanCompleted?.Invoke(new ScanActivity(result.FilesScanned, threatCount, real));
+
+        // 3.0.1.6 (требование A): heartbeat стража конвейера — последний успешный скан.
+        _lastScanCompletedUtc = DateTime.UtcNow;
 
         if (result.Detections.Count == 0 && result.FilesCannotBeMoved.Count == 0)
         {

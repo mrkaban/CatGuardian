@@ -153,6 +153,22 @@ public sealed class HashThreatIndex : IDisposable
         }
     }
 
+    /// <summary>3.0.1.6 (требование 3.3): запоминает уже известный SHA-256 как вредоносный.
+    /// Нужен для импорта карантина на старте: файл лежит зашифрованным (.cgq), его нельзя
+    /// хэшировать по пути (<see cref="Remember"/>) — хэш вычисляется из расшифрованных байт.</summary>
+    public void RememberSha256(string sha256Hex, string virusName)
+    {
+        if (_disposed || string.IsNullOrWhiteSpace(sha256Hex) || string.IsNullOrWhiteSpace(virusName)) return;
+        try
+        {
+            AddLocal(sha256Hex.ToLowerInvariant(), virusName);
+        }
+        catch
+        {
+            // Некритично: индекс — дополнение.
+        }
+    }
+
     private void AddLocal(string key, string virusName)
     {
         lock (_sync)
