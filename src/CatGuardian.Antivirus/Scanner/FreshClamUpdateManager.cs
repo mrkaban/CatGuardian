@@ -37,6 +37,15 @@ public sealed class FreshClamUpdateManager : IDisposable
 
     public event EventHandler<int?>? ProgressChanged;
 
+    /// <summary>
+    /// 3.0.1.6 (требование A2): вызывается, когда freshclam не может заменить базу,
+    /// потому что clamd держит .cvd открытыми («Can't delete the old database …»).
+    /// Колбэк должен освободить базу (остановить clamd, переключив защиту на clamscan)
+    /// и вернуть true, если освобождение выполнено (можно повторить freshclam).
+    /// null — менеджер не освобождает базы (обновление завершится ошибкой блокировки).
+    /// </summary>
+    public Func<bool>? DatabaseReleaseCallback { get; set; }
+
     /// <summary>Построчный вывод freshclam (какие файлы качаются, версии, %).</summary>
     public event EventHandler<string>? OutputLine;
 
@@ -94,8 +103,17 @@ public sealed class FreshClamUpdateManager : IDisposable
 
                 // Повторяем только при характерной ошибке блокировки базы; прочие ошибки
                 // (нет сети, битые зеркала) не лечатся повтором.
-                if (!stdout.Contains("Can't delete the old database", StringComparison.OrdinalIgnoreCase)
-                    && !(stderr ?? "").Contains("Can't delete the old database", StringComparison.OrdinalIgnoreCase))
+                var locked = stdout.Contains("Can't delete the old database", StringComparison.OrdinalIgnoreCase)
+                    || (stderr ?? "").Contains("Can't delete the old database", StringComparison.OrdinalIgnoreCase);
+                if (!locked)
+                {
+                    break;
+                }
+
+                // 3.0.1.6 (требование A2): базы заняты clamd. Освобождаем их через колбэк
+                // (остановка clamd + переключение защиты на clamscan) и повторяем freshclam.
+                // Если освобождение не удалось или колбэк не задан — завершаем ошибкой.
+                if (DatabaseReleaseCallback is null || !DatabaseReleaseCallback())
                 {
                     break;
                 }
@@ -189,40 +207,21 @@ public sealed class FreshClamUpdateManager : IDisposable
     }
 
     /// <summary>
-    /// 3.0.1.3-fix: подготовка каталога баз перед freshclam:
-    ///  1) завершаем clamd/clamscan/clamdscan/freshclam — они держат .cvd файлы открытыми
-    ///     (memory-mapped), из-за чего freshclam не может удалить старый daily.cvd;
-    ///  2) чиним ACL каталога database (SYSTEM/Администраторы — полный доступ, снять ReadOnly),
-    ///     если файлы достались с restrictive-правами (наблюдалось в VM-тесте 3.0.1.3).
+    /// 3.0.1.6 (требование A2): подготовка каталога баз перед freshclam.
+    /// ВАЖНО: НЕ гасим clamd/clamscan/clamdscan/freshclam — realtime-защита обязана
+    /// оставаться живой при обновлении сигнатур. Если freshclam не сможет заменить
+    /// daily.cvd (clamd держит его открытым), AntivirusRunner освободит clamd через
+    /// <see cref="DatabaseReleaseCallback"/> ТОЛЬКО при реальной блокировке, переключив
+    /// защиту на clamscan, а после обновления переподнимет демон с новыми базами.
+    /// Здесь чиним только ACL каталога database (SYSTEM/Администраторы — полный доступ,
+    /// снять ReadOnly), если файлы достались с restrictive-правами (наблюдалось на VM).
     /// Сбой подготовки не должен валить само обновление.
     /// </summary>
     private void PrepareDatabaseForUpdate()
     {
         try
         {
-            // 1) Гасим фоновые/зависшие процессы движка, держащие базы открытыми.
-            foreach (var name in new[] { "clamd", "clamscan", "clamdscan", "freshclam" })
-            {
-                try
-                {
-                    foreach (var p in Process.GetProcessesByName(name))
-                    {
-                        try
-                        {
-                            if (!p.HasExited)
-                            {
-                                p.Kill(entireProcessTree: true);
-                                p.WaitForExit(2000);
-                            }
-                        }
-                        catch { /* уже завершился */ }
-                        finally { try { p.Dispose(); } catch { } }
-                    }
-                }
-                catch { /* перечисление недоступно */ }
-            }
-
-            // 2) ACL: полный доступ SYSTEM и Администраторам на каталог баз (рекурсивно).
+            // ACL: полный доступ SYSTEM и Администраторам на каталог баз (рекурсивно).
             if (!string.IsNullOrWhiteSpace(_databaseDirectory) && Directory.Exists(_databaseDirectory))
             {
                 RunIcacls(_databaseDirectory);
