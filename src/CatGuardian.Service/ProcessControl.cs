@@ -364,6 +364,15 @@ public static class ProcessControl
                 }
 
                 var exePath = process.MainModule?.FileName;
+                // P23: MainModule может быть недоступен (AccessDenied для elevated-процесса) —
+                // резерв: путь из кэша запусков (ProcessPathCache). Это путь, с которым процесс
+                // БЫЛ ЗАПУЩЕН — сверка по нему безопасна (PID-reuse не влияет: кэш привязан
+                // к pid запуска, чужой процесс с переиспользованным PID не получит путь 52725.exe).
+                if (string.IsNullOrWhiteSpace(exePath))
+                {
+                    try { exePath = CatGuardian.Antivirus.Core.ProcessPairs.ProcessPathCache.Get(process.Id); }
+                    catch { exePath = null; }
+                }
                 if (string.IsNullOrWhiteSpace(exePath) ||
                     !string.Equals(exePath, fullPath, StringComparison.OrdinalIgnoreCase))
                 {

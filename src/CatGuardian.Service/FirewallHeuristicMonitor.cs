@@ -321,9 +321,11 @@ public sealed class FirewallHeuristicMonitor : IDisposable
 
         try
         {
-            // Перечитываем конфиг не чаще раза в 2 секунды (панель меняет параметры
-            // через ReloadConfig, а опрос идёт каждые 500 мс–2 с — частый IO не нужен).
-            if (DateTime.UtcNow - _lastConfigLoadUtc > TimeSpan.FromSeconds(2))
+            // 3.0.1.6-fix (D2, 100% CPU): перечитываем конфиг не чаще раза в 30 секунд.
+            // Раньше было 2 с → до 30 парсингов JSON + SHA256 (ComputeGuard/VerifyGuard)
+            // в минуту на ВМ (config_diag.log: LOAD каждые 2–5 с). Панель обновляет
+            // конфиг через ReloadConfig — монитор получает свежие настройки и так.
+            if (DateTime.UtcNow - _lastConfigLoadUtc > TimeSpan.FromSeconds(30))
             {
                 _config.Load();
                 LoadTrustedPaths();
@@ -794,7 +796,9 @@ public sealed class FirewallHeuristicMonitor : IDisposable
                     return;
                 }
 
-                _config.Load();
+                // 3.0.1.6-fix (D2, 100% CPU): НЕ перечитываем конфиг при каждом событии 2004 —
+                // свежие настройки уже приходят через ReloadConfig (панель → служба).
+                // Раньше Load() при шторме событий брандмауэра давал десятки парсингов JSON + SHA256 в минуту.
                 if (!_config.FirewallHeuristicEnabled || !_config.FirewallRuleGuardEnabled) return;
 
                 // 3.0.0.56: собственные правила Cat Guardian (префиксы CatGuardian*,

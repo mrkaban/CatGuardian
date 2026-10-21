@@ -8,9 +8,11 @@ using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using CatGuardian.Antivirus.Core;
 using CatGuardian.Antivirus.Core.Abstractions;
 using CatGuardian.Data;
 using CatGuardian.Antivirus.Core.Configuration;
+using CatGuardian.Antivirus.Core.Heuristics;
 using CatGuardian.Antivirus.Core.Logging;
 using CatGuardian.Antivirus.Core.Monitoring;
 using CatGuardian.Antivirus.Core.ProcessPairs;
@@ -69,6 +71,9 @@ public sealed class AntivirusRunner : IDisposable
     // 3.0.0.40 (P1): подписка на ETW-источник запуска процессов (KernelEtwBridge).
     // Первичный источник — мгновенные ProcessStart; поллинг остаётся fallback'ом.
     private IDisposable? _etwProcessSubscription;
+    // 3.0.1.6 (требование A): момент последнего события ETW-запуска — страж живости ETW.
+    private DateTime _etwLastEventUtc = DateTime.UtcNow;
+    private bool _etwRecreateLogged;
     // 3.0.0.40 (P1): дедупликация PID между ETW и поллингом — один процесс
     // сканируется один раз, независимо от того, какой источник сработал первым.
     private readonly ProcessLaunchGate _launchGate = new();
@@ -77,6 +82,16 @@ public sealed class AntivirusRunner : IDisposable
     private VerdictCache? _verdictCache;
     private HashThreatIndex? _hashIndex; // 3.0.0.17: индекс хэшей угроз (локальные + глобальный seed)
     private int _hashSeedInProgress;      // 3.0.0.17.2: guard пересборки seed
+    // P7-B/P8-B2 (3.0.1.6-p7/p8): кулдаун окон WinlockShield по ПУТИ файла. TrayHost шлёт
+    // winlock_detected несколько раз по одному и тому же процессу (ВМ6: pid 9176 дважды
+    // за ~60 с; ВМ7: SOFT→HARD→эскалация по одному баннеру pid 6260 — 4 окна «Завершить»).
+    // Одно окно на файл в течение 10 минут; повторные детекты — только в лог.
+    private static readonly TimeSpan WinlockShieldAlertCooldown = TimeSpan.FromMinutes(10);
+    private readonly Dictionary<string, DateTime> _winlockShieldAlertCooldown = new(StringComparer.OrdinalIgnoreCase);
+    // P13: кулдаун «запись карантина не найдена» (30 с на путь+операцию) — UI шлёт
+    // повторные «Удалить файл»/«Восстановить», и без дедупликации лог спамится каждые 3 с.
+    private static readonly TimeSpan QuarantineMissCooldown = TimeSpan.FromSeconds(30);
+    private readonly Dictionary<string, DateTime> _quarantineMissCooldown = new(StringComparer.OrdinalIgnoreCase);
     // 3.0.0.37: одноразовый ретрай подготовки seed после неудачной пересборки
     // (sigtool занят или базы заблокированы freshclam/clamd на первом запуске).
     private System.Threading.Timer? _seedRetryTimer;
@@ -87,10 +102,18 @@ public sealed class AntivirusRunner : IDisposable
     // демона, если StartAsync не дождался загрузки базы (холодный старт >120 с).
     private System.Threading.Timer? _clamdRetryTimer;
     private System.Threading.Timer? _sweepTimer;
+    // P16: периодический killer dropper'ов — каждые 60 с сканирует %TEMP%/Desktop/Downloads
+    // на свежие неподписанные процессы и убивает их + цепочку создателей (ВМ 19.10:
+    // D27E/BF8E.tmp.exe плодились каждые 61 с, создатель персистентный).
+    private System.Threading.Timer? _dropperKillerTimer;
     // 3.0.0.17 «Burst-режим»: clamd поднимается при необходимости и гасится по простою,
     // освобождая 1-2 ГБ ОЗУ, как у коммерческих АВ (не держат полную базу постоянно).
     private IScanner? _clamscanScanner;              // базовый clamscan (возврат после простоя clamd)
     private System.Threading.Timer? _clamdIdleTimer; // таймер простоя авто-поднятого clamd
+    // 3.0.1.6 (требование A): страж конвейера — таймер живости сканера (30 с).
+    private System.Threading.Timer? _scannerGuardTimer;
+    // 3.0.1.6 (требование B): детектор блокировки экрана (Winlock Shield).
+    private WinlockShieldMonitor? _winlockShield;
     private DateTime _clamdLastActivityUtc = DateTime.UtcNow;
     private DateTime _clamdStopAtUtc = DateTime.MinValue;
     private bool _clamdAutoLifted;                   // clamd поднят автоматически (по ОЗУ/очереди)
@@ -102,6 +125,14 @@ public sealed class AntivirusRunner : IDisposable
     // проверяем живость демона и переподнимаем его с кулдауном.
     private int _clamdConsecutiveErrors;
     private DateTime _clamdReliftAtUtc = DateTime.MinValue;
+    // 3.0.1.6-fix (D3, 100% память): circuit breaker — 3 неожиданных падения clamd за
+    // 5 минут → перестаём переподнимать демон (остаёмся на clamscan), чтобы не циклиться
+    // и не жрать ОЗУ на повторных загрузках 3,6 млн сигнатур.
+    private readonly Queue<DateTime> _clamdCrashTimes = new();
+    private readonly object _clamdCrashGate = new();
+    private DateTime _clamdCircuitOpenUntilUtc = DateTime.MinValue;
+    private static readonly TimeSpan ClamdCrashWindow = TimeSpan.FromMinutes(5);
+    private const int ClamdMaxCrashes = 3;
 
     /// <summary>Простой clamd после которого авто-поднятый демон гасится (burst-режим).</summary>
     private static readonly TimeSpan ClamdIdleTimeout = TimeSpan.FromMinutes(10);
@@ -167,6 +198,11 @@ public sealed class AntivirusRunner : IDisposable
 
     // Защита от одновременного запуска freshclam (автообновление vs ручное в панели, п.13).
     private int _autoUpdateInProgress;
+
+    // 3.0.1.6 (требование A2): clamd был освобождён на время обновления баз (защита
+    // переключена на clamscan) — после успешного обновления его нужно переподнять
+    // с новыми базами (StartClamdUpgrade), а не просто отправить RELOAD.
+    private bool _clamdReleasedForUpdate;
 
     // Поля нужны для фонового «досмотра» (SweepRecentlyModified).
     private PathFilter? _monitorFilter;
@@ -272,6 +308,13 @@ public sealed class AntivirusRunner : IDisposable
             // 3.0.0.7: контроль автозагрузки стартует независимо от наличия ClamAV
             // (экспресс-анализ ограничится подписью и IOC-базой).
             EnsureAutoStartMonitor();
+            // 3.0.1.6 (требование B): независимый детектор блокировки экрана.
+            SyncWinlockShield();
+
+            // 3.0.1.6 (P2-1): жёсткий ремонт точки входа Windows (Winlogon\Shell/Userinit) —
+            // баннер мог подменить её до старта службы (лог ВМ 16.10: после перезагрузки
+            // оболочка не запускалась). Восстанавливаем ДО входа пользователя.
+            RepairWinlogonShellIfHijacked();
 
             // 3.0.0.8: защита от шифровальщиков (по умолчанию выключена — нулевая нагрузка).
             EnsureRansomwareMonitor();
@@ -380,6 +423,10 @@ public sealed class AntivirusRunner : IDisposable
             _hashIndex = new HashThreatIndex();
             _realTime.HashIndex = _hashIndex;
             _ = EnsureHashSeedAsync();
+            // 3.0.1.6 (требование 3.3): хэши карантина импортируем сразу — после установки
+            // 3.0.1.6 SVIQ.EXE/MicrosoftShellHost.exe сразу в local-индексе (в логах VM
+            // HashIndex(local)=0 весь день — карантин не запоминался).
+            _ = ImportQuarantineHashesAsync();
 
             // 3.0.0.17 «Гибрид + реактивность»: выбор движка.
             // K2: clamd поднимаем СРАЗУ после создания RealTimeScanner, а не в конце
@@ -414,6 +461,13 @@ public sealed class AntivirusRunner : IDisposable
                 // (создание/переименование) сканируются медленным clamscan и ждут в очереди
                 // минуты (досмотр-флуд). Такой clamd помечается autoLifted и гасится
                 // таймером простоя, как в burst-режиме.
+                // 3.0.1.6-fix (D3, 100% память): порог подъёма clamd при старте поднят 3 → 6 ГБ.
+                // На ВМ 4 ГБ clamd с 3,6 млн сигнатур съедал 2,5–3 ГБ → OOM (exit=-1), падение,
+                // зависший переподъём, «СТРАЖ: конвейер молчит 161-219 с». <6 ГБ — clamscan.
+                // P15: порог возвращён 6 → 3 ГБ. Без clamd конвейер на clamscan стоит 2,5 мин
+                // на батч (ВМ 19.10: 7 файлов = 150 с, «СТРАЖ: конвейер молчит 135-276 с»,
+                // ДВА параллельных clamscan от авто-рековери) — продукт неработоспособен.
+                // Защита от OOM-цикла — circuit breaker (3 падения за 5 мин → остаёмся на clamscan).
                 if (_config.ScannerMode != ScannerEngineMode.ClamScanOnly
                     && TotalPhysicalRamGb() >= 3)
                 {
@@ -475,9 +529,34 @@ public sealed class AntivirusRunner : IDisposable
             // Фоновый «досмотр» — надёжный дублёр FileSystemWatcher.
             StartSweepTimer();
 
+            // P16: периодический killer dropper'ов (см. _dropperKillerTimer) — работает
+            // независимо от детекта баннера, добивает персистентного создателя.
+            // P17: интервал 60 с → 180 с и НЕ запускаем, пока есть необработанные реальные
+            // события (не конкурируем за CPU с детектом — ВМ 21.10: SysCPU 90% при атаке,
+            // панель тормозила).
+            _dropperKillerTimer?.Dispose();
+            _dropperKillerTimer = new System.Threading.Timer(_ =>
+            {
+                try
+                {
+                    var rt = _realTime;
+                    if (rt is not null && rt.HasPendingRealEvents()) return;
+                    KillTempDroppers();
+                }
+                catch (Exception ex)
+                {
+                    _logger.Warning(LogCategory.Realtime, "P16-dropper-killer: " + ex.Message);
+                }
+            }, null, TimeSpan.FromSeconds(90), TimeSpan.FromSeconds(180));
+
             // 3.0.0.17: burst-режим — таймер простоя гасит авто-поднятый clamd.
             _clamdIdleTimer = new System.Threading.Timer(OnClamdIdleTick, null,
                 TimeSpan.FromMinutes(5), TimeSpan.FromSeconds(30));
+
+            // 3.0.1.6 (требование A): страж конвейера — конвейер не должен «тихо стоять»
+            // (в логах VM 22:35–22:50 ни одного «Результат пакета» при непустой очереди).
+            _scannerGuardTimer = new System.Threading.Timer(OnScannerGuardTick, null,
+                TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
 
             // USB: новый съёмный диск → сканирование.
             if (_config.DetectNewDrives)
@@ -560,6 +639,17 @@ public sealed class AntivirusRunner : IDisposable
                       e.Quarantined ? Tr.T("Svc2186") : Tr.T("Svc2187")));
 
             WriteEvent(alert);
+
+            // P16: повторные хэш-убийства Winlock.Shield (повторный запуск video_xxx.exe)
+            // НЕ плодят новые окна/POPUP — событие в guardian.db уже записано (WriteEvent),
+            // а алерт панели гейтится единой дедупликацией (первое окно уже показано).
+            if (string.Equals(e.VirusName, "Winlock.Shield", StringComparison.OrdinalIgnoreCase)
+                && WinlockAlertDedup.ShouldSuppress(e.FilePath))
+            {
+                _logger.Info(LogCategory.Realtime,
+                    $"VirusAlert Winlock.Shield для '{e.FilePath}' подавлен единой дедупликацией (окно уже показано).");
+                return;
+            }
 
             try
             {
@@ -661,6 +751,16 @@ public sealed class AntivirusRunner : IDisposable
             return;
         }
 
+        // 3.0.1.6-fix (D3): circuit breaker — пока открыт, демон не поднимаем.
+        if (DateTime.UtcNow < _clamdCircuitOpenUntilUtc)
+        {
+            _logger.Warning(LogCategory.Realtime,
+                "clamd: circuit breaker активен — подъём демона отменён (остаёмся на clamscan).");
+            Interlocked.Exchange(ref _clamdReliftRequested, 0);
+            Interlocked.Exchange(ref _clamdLiftInProgress, 0);
+            return;
+        }
+
         // 3.0.0.76: сериализация подъёма — см. _clamdLiftGate (параллельные подъёмы
         // убивали процесс друг друга через Dispose, порождая NRE в ClamdHost.StartAsync).
         try { await _clamdLiftGate.WaitAsync(); }
@@ -671,12 +771,18 @@ public sealed class AntivirusRunner : IDisposable
         }
         _logger.Info(LogCategory.Realtime, $"clamd: gate за {swPhase.ElapsedMilliseconds} мс.");
 
-        // 3.0.1.4-fix (C1): не поднимаем clamd, пока freshclam обновляет базы — иначе
-        // демон загрузит частично записанный daily.cvd и будет «слеп» к свежим
+        // 3.0.1.4-fix (C1) + P19 (Q1): не поднимаем clamd, пока freshclam обновляет базы —
+        // иначе демон загрузит частично записанный/СТАРЫЙ daily.cvd и будет «слеп» к свежим
         // сигнатурам до SelfCheck (600 с). Ждём завершения обновления (до 60 с).
+        // P19 (Q1): гейт НЕ только на _autoUpdateInProgress (автообновление службы) — панель
+        // и QuickScanRunner запускают freshclam НАПРЯМУЮ, минуя флаг (ВМ 21.10: K2 стартовал
+        // в 12:13:03 и загрузил СТАРЫЙ daily.cvd, пока freshclam работал с 12:12:48 →
+        // «Can't delete the old database daily.cvd»). Проверяем и ЖИВОЙ процесс freshclam.
         var updateDeadline = DateTime.UtcNow + TimeSpan.FromSeconds(60);
-        while (Volatile.Read(ref _autoUpdateInProgress) != 0 && DateTime.UtcNow < updateDeadline)
+        while (DateTime.UtcNow < updateDeadline)
         {
+            var updating = Volatile.Read(ref _autoUpdateInProgress) != 0 || IsFreshClamRunning();
+            if (!updating) break;
             await Task.Delay(500);
         }
         _logger.Info(LogCategory.Realtime, $"clamd: freshclam-ожидание за {swPhase.ElapsedMilliseconds} мс.");
@@ -727,9 +833,22 @@ public sealed class AntivirusRunner : IDisposable
             // L3: dedicated-поток (LongRunning) вместо Task.Run — на старте службы пул
             // потоков перегружен инициализацией, и Task.Run ждал свободный поток ~17 с
             // (в логах VM: KillOrphanClamds 09:45:24 → «clamd: запуск процесса» 09:45:41).
-            var ok = await Task.Factory.StartNew(
+            // 3.0.1.6-fix (D3): жёсткий таймаут старта 90 с. Раньше StartAsync мог висеть
+            // 160+ с (ВМ: «StartAsync за 160566 мс»), а повторный подъём отбрасывался флагом
+            // «подъём уже идёт». Теперь по таймауту выходим, планируем «подхват» (демон
+            // продолжает грузиться в фоне — ScheduleClamdAdoptionRetry проверит порт).
+            var startTask = Task.Factory.StartNew(
                 () => host.StartAsync().GetAwaiter().GetResult(),
                 CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+            var ok = await Task.WhenAny(startTask, Task.Delay(TimeSpan.FromSeconds(90))) == startTask
+                ? await startTask
+                : false;
+            if (!ok)
+            {
+                _logger.Warning(LogCategory.Realtime,
+                    $"clamd: StartAsync не уложился в 90 с ({swPhase.ElapsedMilliseconds} мс истекло) — " +
+                    "демон может продолжать грузиться, запланирован подхват.");
+            }
             _logger.Info(LogCategory.Realtime, $"clamd: StartAsync за {swPhase.ElapsedMilliseconds} мс (итого).");
             var rt = _realTime;
             if (!ok || rt is null)
@@ -819,6 +938,28 @@ public sealed class AntivirusRunner : IDisposable
     {
         _logger.Warning(LogCategory.Realtime,
             $"clamd: демон завершился (exit={exitCode}) — переподъём.");
+
+        // 3.0.1.6-fix (D3): circuit breaker — при 3 падениях за 5 минут перестаём
+        // переподнимать clamd (остаёмся на clamscan). В логах ВМ clamd умирал (exit=-1),
+        // переподъём занимал 55+ с и повторялся циклически при нехватке ОЗУ.
+        var now = DateTime.UtcNow;
+        lock (_clamdCrashGate)
+        {
+            while (_clamdCrashTimes.Count > 0 && now - _clamdCrashTimes.Peek() > ClamdCrashWindow)
+            {
+                _clamdCrashTimes.Dequeue();
+            }
+            _clamdCrashTimes.Enqueue(now);
+            if (_clamdCrashTimes.Count >= ClamdMaxCrashes)
+            {
+                _clamdCircuitOpenUntilUtc = now + ClamdCrashWindow;
+                _logger.Error(LogCategory.Realtime,
+                    $"clamd: circuit breaker открыт ({ClamdMaxCrashes} падения за {ClamdCrashWindow.TotalMinutes:F0} мин) " +
+                    "— перестаём переподнимать демон, остаёмся на clamscan.");
+                return;
+            }
+        }
+
         if (DateTime.UtcNow - _clamdReliftAtUtc < ClamdReliftCooldown)
         {
             _logger.Warning(LogCategory.Realtime,
@@ -1092,6 +1233,14 @@ public sealed class AntivirusRunner : IDisposable
                 return;
             }
 
+            // 3.0.1.6 (требование A): при активной очереди реальных событий clamd не гасим —
+            // иначе конвейер останется на медленном clamscan в момент боя (в логах VM
+            // clamd был погашен в 22:35:17, а бой шёл в 22:40–22:44).
+            if (_realTime is not null && _realTime.HasPendingRealEvents())
+            {
+                return;
+            }
+
             _logger.Info(LogCategory.Realtime,
                 Tr.T("Svc2204") + (int)ClamdIdleTimeout.TotalMinutes +
                 Tr.T("Svc2205"));
@@ -1100,6 +1249,94 @@ public sealed class AntivirusRunner : IDisposable
         catch (Exception ex)
         {
             _logger.Error(LogCategory.Realtime, Tr.T("Svc2206") + ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// 3.0.1.6 (требование A): страж конвейера. Каждые 30 с проверяет, что сканер жив:
+    /// если очередь реальных событий непуста, а последний скан завершён давно (>120 с) —
+    /// конвейер «тихо стоит» (в логах VM 22:35–22:50 не было ни одного «Результат пакета»
+    /// при непустой очереди, и защита молчала 15+ минут). Тогда ERROR + авто-восстановление:
+    /// пересоздаём clamd/clamscan, чтобы воркер продолжил на следующем цикле.
+    /// </summary>
+    private void OnScannerGuardTick(object? state)
+    {
+        try
+        {
+            var rt = _realTime;
+            if (rt is null)
+            {
+                return;
+            }
+
+            // 3.0.1.6 (требование A): живость ETW-источника. Если «Контроль запуска» активен,
+            // есть активная интерактивная сессия, но событий ETW нет ≥5 минут — сессия ядра
+            // мертва (в логах VM после перезагрузки запуски вирусов были невидимы). Пересоздаём.
+            try
+            {
+                if (_config.MonitorProcessExecution
+                    && _etwProcessSubscription is not null
+                    && DateTime.UtcNow - _etwLastEventUtc > TimeSpan.FromMinutes(5)
+                    && NativeWts.WTSGetActiveConsoleSessionId() is not (0xFFFFFFFF or 0)
+                    && !_etwRecreateLogged)
+                {
+                    _etwRecreateLogged = true;
+                    _logger.Error(LogCategory.Realtime,
+                        "СТРАЖ ETW: нет событий запуска ≥5 минут при активной сессии — пересоздаю ETW-сессию ядра.");
+                    DetachEtwProcessSource();
+                    AttachEtwProcessSource();
+                    _etwLastEventUtc = DateTime.UtcNow;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.Warning(LogCategory.Realtime, "СТРАЖ ETW: проверка не удалась: " + ex.Message);
+            }
+
+            // Очередь пуста — страж не нужен (конвейер в ожидании событий).
+            if (!rt.HasPendingRealEvents())
+            {
+                return;
+            }
+
+            // P15: если скан НАЧАЛСЯ недавно (< 300 с) — батч в полёте (на clamscan батч
+            // легитимно занимает 2,5 мин). НЕ пересоздаём сканер: иначе параллельный
+            // clamscan конкурирует за память/CPU и конвейер становится ещё медленнее
+            // (ВМ 19.10: «СТРАЖ: конвейер молчит 135-276 с» + ДВА параллельных clamscan).
+            var sinceStart = DateTime.UtcNow - rt.LastScanStartedUtc;
+            if (sinceStart < TimeSpan.FromSeconds(300))
+            {
+                return;
+            }
+
+            var idle = DateTime.UtcNow - rt.LastScanCompletedUtc;
+            if (idle < TimeSpan.FromSeconds(300))
+            {
+                return;
+            }
+
+            _logger.Error(LogCategory.Realtime,
+                $"СТРАЖ: конвейер молчит {idle.TotalSeconds:F0} с при непустой очереди и без активного скана — авто-восстановление сканера.");
+
+            if (_config.UseResidentClamd)
+            {
+                // Переподнимаем clamd (защита перейдёт на clamscan, пока демон грузится).
+                StartClamdUpgrade(autoLifted: true);
+            }
+            else
+            {
+                var fresh = ScannerFactory.TryCreate(_config, _logger);
+                if (fresh is not null && rt is not null)
+                {
+                    _scanner = fresh;
+                    _clamscanScanner = fresh;
+                    rt.SetScanner(fresh);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(LogCategory.Realtime, "СТРАЖ: ошибка проверки: " + ex.Message);
         }
     }
 
@@ -1131,6 +1368,34 @@ public sealed class AntivirusRunner : IDisposable
         {
             _logger.Error(LogCategory.Realtime, Tr.T("Svc2207") + ex.Message);
         }
+    }
+
+    /// <summary>
+    /// P19 (Q1): работает ли процесс freshclam (обновление баз). Гейт подъёма clamd:
+    /// панель и QuickScanRunner запускают freshclam НАПРЯМУЮ, минуя _autoUpdateInProgress
+    /// службы — без этой проверки K2 стартует и грузит СТАРЫЙ daily.cvd, пока freshclam
+    /// пытается его заменить («Can't delete the old database», ВМ 21.10).
+    /// </summary>
+    private static bool IsFreshClamRunning()
+    {
+        try
+        {
+            foreach (var p in System.Diagnostics.Process.GetProcesses())
+            {
+                try
+                {
+                    var name = p.ProcessName;
+                    if (string.Equals(name, "freshclam.exe", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(name, "freshclam", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+                }
+                finally { try { p.Dispose(); } catch { } }
+            }
+        }
+        catch { /* перечисление процессов недоступно — считаем, что freshclam не работает */ }
+        return false;
     }
 
     /// <summary>
@@ -1494,16 +1759,32 @@ public sealed class AntivirusRunner : IDisposable
     /// </summary>
     private void OnEtwProcessStarted(ProcessTraceData data)
     {
+        // 3.0.1.6 (требование A): heartbeat живости ETW-источника.
+        _etwLastEventUtc = DateTime.UtcNow;
+        _etwRecreateLogged = false;
+
         var pid = data.ProcessID;
         if (pid <= 8 || pid == Environment.ProcessId)
         {
             return;
         }
 
-        // P3: заведомо системные процессы не резолвим и не сканируем.
+        // P3: заведомо системные процессы пропускаем, НО только если их путь подтверждает
+        // системность (System32/SysWOW64). 3.0.1.6: маскирад системным именем из НЕсистемного
+        // каталога (explorer.exe / svchost.exe на Desktop) обязан сканироваться —
+        // TryResolveLaunchPath решает по фактическому пути, а не по имени вслепую.
         if (SystemProcessNames.IsSystemImageName(data.ImageFileName))
         {
-            return;
+            var cachedSys = ProcessPathCache.Get(pid);
+            if (!string.IsNullOrEmpty(cachedSys) && IsUnderSystemDirectory(cachedSys))
+            {
+                return;
+            }
+            if (string.IsNullOrEmpty(cachedSys) && TryResolveLaunchPath(pid) is null)
+            {
+                // Недоступный процесс с системным именем — вероятно настоящий системный.
+                return;
+            }
         }
 
         // P2: сначала общий кэш — путь короткоживущего процесса мог быть записан
@@ -1512,6 +1793,13 @@ public sealed class AntivirusRunner : IDisposable
         if (string.IsNullOrEmpty(path))
         {
             path = TryResolveLaunchPath(pid);
+        }
+
+        // P16: регистрируем запуск с РОДИТЕЛЕМ (data.ParentID из ETW) — для трассировки
+        // создателя короткоживущего dropper'а (см. RecentProcessStarts.FindByPath).
+        if (!string.IsNullOrEmpty(path))
+        {
+            RecentProcessStarts.Record(pid, path, data.ParentID);
         }
 
         if (string.IsNullOrEmpty(path) || !_launchGate.TryClaim(pid))
@@ -1534,7 +1822,19 @@ public sealed class AntivirusRunner : IDisposable
             // P3: ProcessName дешевле MainModule (не читает образ с диска).
             if (SystemProcessNames.IsSystemImageName(process.ProcessName + ".exe"))
             {
-                return null;
+                // 3.0.1.6: системное имя из НЕсистемного каталога = маскирад (explorer.exe
+                // на Desktop). Резолвим полный путь и решаем по расположению.
+                var sysPath = process.MainModule?.FileName;
+                if (string.IsNullOrEmpty(sysPath))
+                {
+                    return null; // процесс недоступен/завершился — вероятно системный
+                }
+                if (IsUnderSystemDirectory(sysPath))
+                {
+                    return null; // настоящий системный процесс — не сканируем
+                }
+                ProcessPathCache.Record(pid, sysPath);
+                return sysPath; // маскирад системным именем — сканируем!
             }
 
             var path = process.MainModule?.FileName;
@@ -1548,6 +1848,26 @@ public sealed class AntivirusRunner : IDisposable
         catch (Exception)
         {
             return null;
+        }
+    }
+
+    /// <summary>3.0.1.6: находится ли путь внутри системных каталогов
+    /// (System32/SysWOW64) — признак настоящего системного процесса.</summary>
+    private static bool IsUnderSystemDirectory(string path)
+    {
+        try
+        {
+            var full = Path.GetFullPath(path).TrimEnd('\\');
+            var sys = Path.GetFullPath(Environment.SystemDirectory).TrimEnd('\\');
+            var win = Path.GetFullPath(Environment.GetFolderPath(Environment.SpecialFolder.Windows)).TrimEnd('\\');
+            return full.Equals(sys, StringComparison.OrdinalIgnoreCase)
+                || full.StartsWith(sys + "\\", StringComparison.OrdinalIgnoreCase)
+                || full.StartsWith(win + "\\System32", StringComparison.OrdinalIgnoreCase)
+                || full.StartsWith(win + "\\SysWOW64", StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
         }
     }
 
@@ -1623,6 +1943,9 @@ public sealed class AntivirusRunner : IDisposable
             // 3.0.0.40 (P2): фиксируем полный путь в общем кэше, пока процесс жив —
             // путь короткоживущего процесса переживает его завершение.
             ProcessPathCache.Record(e.ProcessId, e.Path);
+            // P16: регистрируем запуск с родителем (поллинг-источник) — трассировка
+            // создателя dropper'а даже после завершения dropper-процесса.
+            RecentProcessStarts.Record(e.ProcessId, e.Path, GetParentProcessId(e.ProcessId));
 
             // Собственный процесс не сканируем.
             if (e.ProcessId == Environment.ProcessId)
@@ -1647,12 +1970,17 @@ public sealed class AntivirusRunner : IDisposable
                 return;
             }
 
-            if (!File.Exists(full) || !filter.ShouldMonitor(full))
+            // 3.0.1.6 (требование C): «Контроль запуска» проверяет КАЖДЫЙ запускаемый процесс.
+            // File.Exists обязателен; фильтр PathFilter.ShouldMonitor (ограничение по DirToScan)
+            // для запусков НЕ применяется — вирус с Desktop\virus / Temp\virus обязан попасть
+            // в PreScan (в логах VM q8gj4sm2u.exe запускался без единого следа мониторинга).
+            if (!File.Exists(full))
             {
                 return;
             }
 
-            await rt.HandleProcessLaunchAsync(full, e.ProcessId);
+            var riskZone = IsRiskZonePath(full);
+            await rt.HandleProcessLaunchAsync(full, e.ProcessId, riskZone);
         }
         catch (ObjectDisposedException)
         {
@@ -1661,6 +1989,130 @@ public sealed class AntivirusRunner : IDisposable
         catch (Exception ex)
         {
             _logger.Error(LogCategory.Realtime, Tr.T("Svc2215") + ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// 3.0.1.6 (требование C): risk-зона — файл обязан сканироваться при КАЖДОМ запуске
+    /// (без rate-limit 60 с). Включает Desktop/Temp/Downloads/Documents/Public +
+    /// <c>PreScanSuspiciousFolders</c> + баннерные имена (video*, lock*, banner*).
+    /// </summary>
+    private bool IsRiskZonePath(string full)
+    {
+        if (string.IsNullOrWhiteSpace(full))
+        {
+            return false;
+        }
+
+        try
+        {
+            var name = Path.GetFileName(full);
+            if (!string.IsNullOrEmpty(name)
+                && (name.StartsWith("video", StringComparison.OrdinalIgnoreCase)
+                    || name.StartsWith("lock", StringComparison.OrdinalIgnoreCase)
+                    || name.StartsWith("banner", StringComparison.OrdinalIgnoreCase)))
+            {
+                return true;
+            }
+
+            // W3-8 (3.0.1.6-fix): маскарад системного имени/пути (C:\WINDОWS\ехрlоrеr.exe) —
+            // скан при КАЖДОМ запуске. Rate-limit 60 с пропускал такой баннер в логе ВМ
+            // 15.10.2026 («Pre-Scan: пропущен (путь проверен 60 с назад): C:\WINDОWS\ехрlоrеr.exe»).
+            if (MasqueradeNames.IsMasqueradePath(full))
+            {
+                return true;
+            }
+
+            foreach (var zone in EnumerateRiskFolders())
+            {
+                if (IsInsideDir(full, zone))
+                {
+                    return true;
+                }
+            }
+        }
+        catch
+        {
+            // Ошибка определения зоны — считаем путь НЕ risk-зоной (проверка всё равно пойдёт).
+        }
+
+        return false;
+    }
+
+    /// <summary>Раскрывает список risk-папок: <c>PreScanSuspiciousFolders</c> (с %VAR%) +
+    /// стандартные Desktop/Downloads/Documents/Public пользователя. 3.0.1.6 (требование C).</summary>
+    private IEnumerable<string> EnumerateRiskFolders()
+    {
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            foreach (var raw in (_config.PreScanSuspiciousFolders ?? "")
+                         .Split(';', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var expanded = Environment.ExpandEnvironmentVariables(raw.Trim());
+                if (!string.IsNullOrWhiteSpace(expanded))
+                {
+                    set.Add(Path.GetFullPath(expanded).TrimEnd('\\'));
+                }
+            }
+        }
+        catch { /* некорректные пути пропускаем */ }
+
+        try
+        {
+            var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            if (!string.IsNullOrWhiteSpace(profile))
+            {
+                set.Add(Path.Combine(profile, "Desktop"));
+                set.Add(Path.Combine(profile, "Downloads"));
+                set.Add(Path.Combine(profile, "Documents"));
+            }
+            var pub = Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory);
+            if (!string.IsNullOrWhiteSpace(pub))
+            {
+                set.Add(pub.TrimEnd('\\'));
+            }
+        }
+        catch { /* зоны недоступны */ }
+
+        // P19 (Q4): служба SYSTEM через SpecialFolder.UserProfile получает systemprofile,
+        // а НЕ профиль пользователя — Desktop/Downloads пользователя не попадали в risk-зоны,
+        // и дроппер 52725.exe на Desktop сканировался с rate-limit 60 с («Pre-Scan: пропущен
+        // (путь проверен 60 с назад): 52725.exe», ВМ 21.10) → алерт высокорискового процесса
+        // не показывался на каждый запуск. «Горячие» каталоги (Desktop/Downloads/Documents/
+        // Temp из конфига/дефолта) служба знает — добавляем их в risk-зоны.
+        try
+        {
+            foreach (var hf in EffectiveHotFolders())
+            {
+                if (string.IsNullOrWhiteSpace(hf)) continue;
+                // P20 (P1): DefaultHotFolders содержит %USERPROFILE%\Desktop — Path.GetFullPath
+                // НЕ раскрывает %VAR% (в risk-зоны попадал литеральный путь → 52725.exe на
+                // Desktop не считался risk-зоной → rate-limit 60 с подавлял повторный алерт,
+                // ВМ4 13:03:29 «Pre-Scan: пропущен … 52725.exe»).
+                var expanded = Environment.ExpandEnvironmentVariables(hf);
+                if (string.IsNullOrWhiteSpace(expanded)) continue;
+                try { set.Add(Path.GetFullPath(expanded).TrimEnd('\\')); }
+                catch { /* некорректный путь — пропускаем */ }
+            }
+        }
+        catch { /* зоны недоступны */ }
+
+        return set;
+    }
+
+    private static bool IsInsideDir(string full, string dir)
+    {
+        try
+        {
+            full = Path.GetFullPath(full).TrimEnd('\\');
+            dir = Path.GetFullPath(dir).TrimEnd('\\');
+            return full.Equals(dir, StringComparison.OrdinalIgnoreCase)
+                || full.StartsWith(dir + "\\", StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
         }
     }
 
@@ -1830,6 +2282,10 @@ public sealed class AntivirusRunner : IDisposable
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GlobalMemoryStatusEx(ref MemoryStatusEx lpBuffer);
 
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool QueryFullProcessImageName(
+        IntPtr hProcess, uint dwFlags, System.Text.StringBuilder lpExeName, ref uint lpdwSize);
+
     private bool IsOwnPath(string path)
     {
         if (IsWithinPath(path, AppContext.BaseDirectory))
@@ -1982,6 +2438,8 @@ public sealed class AntivirusRunner : IDisposable
                 // M3: свитч «Контроль процессов и ETW-мониторинг» применяется без перезапуска
                 // службы (раньше флаг читался только при старте AntivirusRunner.Start).
                 SyncProcessMonitor();
+                // 3.0.1.6 (требование B): Winlock Shield применяется без перезапуска службы.
+                SyncWinlockShield();
                 // 3.0.0.17 «Гибрид + реактивность»: применяем новые интервал досмотра,
                 // горячие каталоги и выбор движка без перезапуска службы.
                 StartSweepTimer();
@@ -2149,6 +2607,63 @@ public sealed class AntivirusRunner : IDisposable
     }
 
     /// <summary>
+    /// 3.0.1.6 (требование 3.3): импорт хэшей карантина в локальный hash-индекс при старте.
+    /// Файлы лежат зашифрованными (.cgq) — расшифровываем и вычисляем SHA-256
+    /// (<see cref="CatGuardian.Antivirus.Core.Quarantine.QuarantineService.TryReadPlainBytes"/>),
+    /// затем <see cref="CatGuardian.Antivirus.Core.Services.HashThreatIndex.RememberSha256"/>.
+    /// </summary>
+    private async Task ImportQuarantineHashesAsync()
+    {
+        var idx = _hashIndex;
+        if (idx is null || _quarantine is null)
+        {
+            return;
+        }
+
+        try
+        {
+            var entries = await Task.Run(() => _quarantine.GetEntries()).ConfigureAwait(false);
+            if (entries.Count == 0)
+            {
+                return;
+            }
+
+            int imported = 0;
+            foreach (var entry in entries)
+            {
+                try
+                {
+                    var plain = _quarantine.TryReadPlainBytes(entry);
+                    if (plain is null || plain.Length == 0)
+                    {
+                        continue;
+                    }
+
+                    var sha = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(plain)).ToLowerInvariant();
+                    var name = string.IsNullOrWhiteSpace(entry.VirusName) ? "QuarantineImport" : entry.VirusName;
+                    idx.RememberSha256(sha, name);
+                    imported++;
+                }
+                catch
+                {
+                    // Отдельная запись не должна валить импорт остальных.
+                }
+            }
+
+            if (imported > 0)
+            {
+                _logger.Info(LogCategory.Realtime,
+                    $"HashIndex: импортировано из карантина локальных хэшей: {imported} " +
+                    $"(всего local: {idx.LocalCount}).");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(LogCategory.Realtime, "HashIndex: импорт карантина не удался: " + ex.Message);
+        }
+    }
+
+    /// <summary>
     /// 3.0.0.37: одноразовый ретрай подготовки seed после неудачи. Seed может не
     /// собраться из-за временных блокировок баз (freshclam/clamd) — повтор через
     /// <see cref="SeedRetryDelay"/> даёт им освободиться. Дальнейшие попытки не
@@ -2305,14 +2820,488 @@ public sealed class AntivirusRunner : IDisposable
     /// <summary>
     /// Обрабатывает решение панели по алерту Winlock Protection (3.0.0.20):
     /// «Восстановить и доверять» / «Оставить изолированным».
+    /// 3.0.1.6 (P1-3): WinlockShield-алерт (actionKey с префиксом «winlock_shield:») —
+    /// обрабатывается ЗДЕСЬ (whitelist + карантин), а не в AutoStartMonitor.
     /// </summary>
     public bool HandleWinlockAction(CatGuardian.Integrity.Ipc.WinlockActionDto dto)
     {
+        if (dto is null)
+        {
+            return false;
+        }
+
+        if (dto.ActionKey.StartsWith("winlock_shield:", StringComparison.Ordinal))
+        {
+            return HandleWinlockShieldAction(dto);
+        }
+
         var ok = _autoStartMonitor?.HandleWinlockAction(dto) ?? false;
         _logger.Info(LogCategory.Realtime, ok
             ? Tr.T("Svc2244")
             : Tr.T("Svc2245"));
         return ok;
+    }
+
+    /// <summary>
+    /// 3.0.1.6 (P1-3): решение пользователя по WinlockShield-алерту:
+    ///  - TrustAndRestore — внести путь/хэш в WinlockShieldWhitelist + восстановить из карантина;
+    ///  - DeleteFile — безвозвратно удалить карантинную копию;
+    ///  - KeepIsolated — оставить файл в карантине (процесс уже завершён).
+    /// </summary>
+    private bool HandleWinlockShieldAction(CatGuardian.Integrity.Ipc.WinlockActionDto dto)
+    {
+        try
+        {
+            switch (dto.Action)
+            {
+                case CatGuardian.Integrity.Ipc.WinlockActionKind.TrustAndRestore:
+                    AddWinlockShieldWhitelist(dto.FilePath);
+                    var restored = RestoreFromQuarantine(dto.FilePath);
+                    _logger.Info(LogCategory.Realtime,
+                        $"WinlockShield: пользователь доверяет «{dto.FilePath}» " +
+                        $"(whitelist добавлен, восстановление из карантина: {restored}).");
+                    return true;
+
+                case CatGuardian.Integrity.Ipc.WinlockActionKind.DeleteFile:
+                    // P7-C: «Удалить файл» = ФИЗИЧЕСКОЕ удаление файла баннера. Карантинная
+                    // запись может отсутствовать (карантин живого процесса падал с
+                    // Access denied — ВМ6: «запись карантина не найдена», а файл оставался
+                    // и баннер пересоздавался).
+                    var physicallyDeleted = TryDeleteInfectedFile(dto.FilePath);
+                    var deleted = DeleteFromQuarantine(dto.FilePath);
+                    _logger.Info(LogCategory.Realtime,
+                        $"WinlockShield: файл «{dto.FilePath}» удалён по решению пользователя " +
+                        $"(файл: {physicallyDeleted}, запись карантина: {deleted}).");
+                    return true;
+
+                case CatGuardian.Integrity.Ipc.WinlockActionKind.KeepIsolated:
+                    _logger.Info(LogCategory.Realtime,
+                        $"WinlockShield: файл «{dto.FilePath}» оставлен изолированным (карантин).");
+                    return true;
+
+                default:
+                    _logger.Warning(LogCategory.Realtime,
+                        $"WinlockShield: неизвестное действие {dto.Action} по алерту {dto.ActionKey}.");
+                    return false;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(LogCategory.Realtime, "WinlockShield: обработка решения пользователя: " + ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>3.0.1.6 (P1-3): вносит путь (и хэш из карантинной копии) в WinlockShieldWhitelist
+    /// конфига и сохраняет его. Детектор TrayHost перечитывает конфиг каждые 30 с.</summary>
+    private void AddWinlockShieldWhitelist(string path)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                return;
+            }
+
+            if (_config.WinlockShieldWhitelist.Any(e =>
+                    string.Equals(e.Path, path, StringComparison.OrdinalIgnoreCase)))
+            {
+                return;
+            }
+
+            string? hash = null;
+            try
+            {
+                var entry = _quarantine.GetEntries()
+                    .FirstOrDefault(e => string.Equals(e.OriginalPath, path, StringComparison.OrdinalIgnoreCase));
+                if (entry is not null)
+                {
+                    var plain = _quarantine.TryReadPlainBytes(entry);
+                    if (plain is not null)
+                    {
+                        using var sha = System.Security.Cryptography.SHA256.Create();
+                        hash = Convert.ToHexString(sha.ComputeHash(plain));
+                    }
+                }
+            }
+            catch
+            {
+                // Хэш недоступен — whitelist по пути всё равно работает.
+            }
+
+            _config.WinlockShieldWhitelist.Add(new JsonConfiguration.WinlockWhitelistEntry
+            {
+                Path = path,
+                Hash = hash,
+                Publisher = "",
+                Reason = "user_trusted",
+                AddedBy = "user",
+                AddedAt = DateTime.UtcNow,
+            });
+            _config.Save();
+
+            _logger.Info(LogCategory.Realtime,
+                $"WinlockShield: «{path}» добавлен в whitelist (hash={(string.IsNullOrEmpty(hash) ? "—" : hash)}).");
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(LogCategory.Realtime, "WinlockShield: добавление в whitelist: " + ex.Message);
+        }
+    }
+
+    /// <summary>3.0.1.6 (P1-3): восстанавливает файл из карантина в исходный путь
+    /// (запись ищется по OriginalPath).</summary>
+    private bool RestoreFromQuarantine(string path)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                return false;
+            }
+
+            var entry = _quarantine.GetEntries()
+                .FirstOrDefault(e => string.Equals(e.OriginalPath, path, StringComparison.OrdinalIgnoreCase));
+            if (entry is null)
+            {
+                // P13: дедупликация — повторные клики UI не спамят лог каждые 3 с.
+                if (!QuarantineMissLogged("restore:" + path))
+                {
+                    _logger.Warning(LogCategory.Realtime,
+                        $"WinlockShield: запись карантина для «{path}» не найдена — восстановление невозможно.");
+                }
+                return false;
+            }
+
+            return _quarantine.Restore(entry);
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(LogCategory.Realtime, "WinlockShield: восстановление из карантина: " + ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>3.0.1.6 (P1-3): безвозвратно удаляет карантинную копию файла
+    /// (запись ищется по OriginalPath).</summary>
+    private bool DeleteFromQuarantine(string path)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                return false;
+            }
+
+            var entry = _quarantine.GetEntries()
+                .FirstOrDefault(e => string.Equals(e.OriginalPath, path, StringComparison.OrdinalIgnoreCase));
+            if (entry is null)
+            {
+                // P13: дедупликация — повторные клики UI не спамят лог каждые 3 с.
+                if (!QuarantineMissLogged("delete:" + path))
+                {
+                    _logger.Warning(LogCategory.Realtime,
+                        $"WinlockShield: запись карантина для «{path}» не найдена — удаление невозможно.");
+                }
+                return false;
+            }
+
+            return _quarantine.Delete(entry);
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(LogCategory.Realtime, "WinlockShield: удаление из карантина: " + ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>P13: true — «запись карантина не найдена» уже логировалась для этого
+    /// ключа в пределах <see cref="QuarantineMissCooldown"/> (дедупликация спама от
+    /// повторных кликов UI).</summary>
+    private bool QuarantineMissLogged(string key)
+    {
+        var now = DateTime.UtcNow;
+        lock (_sync)
+        {
+            if (_quarantineMissCooldown.TryGetValue(key, out var last) && now - last < QuarantineMissCooldown)
+            {
+                return true;
+            }
+            _quarantineMissCooldown[key] = now;
+            if (_quarantineMissCooldown.Count > 4096)
+            {
+                foreach (var stale in _quarantineMissCooldown.Where(kv => now - kv.Value > QuarantineMissCooldown).Select(kv => kv.Key).ToList())
+                {
+                    _quarantineMissCooldown.Remove(stale);
+                }
+            }
+        }
+        return false;
+    }
+
+    /// <summary>P7-C (3.0.1.6-p7): безвозвратно удаляет САМ ФАЙЛ баннера (кнопка «Удалить файл»).
+    /// Карантинная запись не обязана существовать — карантин живого процесса даёт Access denied.
+    /// Собственные файлы Cat Guardian не трогаем.</summary>
+    private static bool TryDeleteInfectedFile(string path)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return false;
+            var norm = Path.GetFullPath(path);
+            var installDir = Path.GetFullPath(AppContext.BaseDirectory).TrimEnd('\\', '/');
+            if (norm.StartsWith(installDir + "\\", StringComparison.OrdinalIgnoreCase)) return false;
+            if (norm.IndexOf("Cat Guardian", StringComparison.OrdinalIgnoreCase) >= 0) return false;
+            File.SetAttributes(norm, FileAttributes.Normal);
+            File.Delete(norm);
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 3.0.1.6 (P1-3): отправляет WinlockShield-алерт (MessageKind.WinlockAlert) панели
+    /// (или в очередь интерактивных алертов → POPUP трейхоста при недоступной панели).
+    /// actionKey с префиксом «winlock_shield:<pid>:<path>» позволяет службе
+    /// отличать этот алерт от старого AutoStart-Winlock.
+    /// </summary>
+    private void SendWinlockShieldAlert(int pid, string processPath, int sessionId, int signals, bool killed, bool quarantined)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(processPath))
+            {
+                return;
+            }
+
+            // P7-B: повторный детект того же файла в течение кулдауна — окно уже показано,
+            // новые окна не плодим (баннер мог пересоздать процесс с новым PID — тот же файл).
+            var alertNow = DateTime.UtcNow;
+            if (_winlockShieldAlertCooldown.TryGetValue(processPath, out var lastAlert)
+                && (alertNow - lastAlert) < WinlockShieldAlertCooldown)
+            {
+                _logger.Info(LogCategory.Realtime,
+                    $"WinlockShield: повторный детект файла '{processPath}' (pid={pid}) — окно уже показано, " +
+                    $"кулдаун {WinlockShieldAlertCooldown.TotalSeconds:0} с.");
+                return;
+            }
+            _winlockShieldAlertCooldown[processPath] = alertNow;
+            // P14: помечаем в ЕДИНОЙ дедупликации — алерты AutoStartMonitor
+            // (winlock_autoremove/winlock:reg) для этого файла будут подавлены.
+            WinlockAlertDedup.MarkShown(processPath);
+
+            string quarantinePath = "";
+            try
+            {
+                var entry = _quarantine.GetEntries()
+                    .FirstOrDefault(e => string.Equals(e.OriginalPath, processPath, StringComparison.OrdinalIgnoreCase));
+                quarantinePath = entry?.QuarantinePath ?? "";
+            }
+            catch
+            {
+                // Карантинная запись недоступна — алерт всё равно показываем.
+            }
+
+            // P4-D: детали алерта — честный статус карантина + пометка кириллического
+            // маскарада (P0) + сверка SHA-256 системной утилиты с эталоном (P4-B3).
+            var details = $"Winlock Shield: баннер-блокировщик экрана (pid={pid}, signals={signals}, session={sessionId}).";
+            // P6-A (3.0.1.6-p6): пометка кириллического маскарада убрана из details — окно
+            // показывает её СРАЗУ под путём (WinlockMasqueradeWarning), POPUP трейхоста (P5-A)
+            // добавляет свою из processPath (TrayHostApplicationContext). Дублирования нет.
+            if (IsSystemUtilityPath(processPath))
+            {
+                details += SystemUtilityMatchesBaseline(processPath)
+                    ? " Утилита Microsoft: SHA-256 совпадает с эталоном."
+                    : " Утилита Microsoft: SHA-256 отличается от эталона (возможно, обновление Windows — подпись проверена).";
+            }
+            if (!quarantined && File.Exists(processPath))
+            {
+                details += " Карантин не удался (файл защищён системой) — файл НЕ изолирован.";
+            }
+            else if (!quarantined)
+            {
+                details += " Файл отсутствует — карантин не требуется.";
+            }
+
+            // P16: честная подпись — маскарад-путь (кириллические гомоглифы) = заведомая
+            // подмена, «❌ Отсутствует (маскарад-путь)», а не «не подписано Microsoft».
+            var signatureText = MasqueradeNames.IsMasqueradePath(processPath)
+                ? "❌ Отсутствует (маскарад-путь)"
+                : IsMicrosoftSignedFile(processPath)
+                    ? "Microsoft"
+                    : "не подписано Microsoft";
+
+            // P16: сводка с ФАКТАМИ (что сделано), а не только pid/signals/session.
+            var summary = $"Winlock Shield: баннер-блокировщик экрана изолирован. " +
+                          $"Файл: {processPath}. " +
+                          (quarantined ? "Файл перемещён в карантин (зашифрован). " : "Карантин не выполнен. ") +
+                          (killed ? "Запущенный процесс баннера завершён. " : "") +
+                          $"(pid={pid}, signals={signals}, session={sessionId}).";
+
+            var alert = new CatGuardian.Integrity.Ipc.WinlockAlertDto
+            {
+                ActionKey = $"winlock_shield:{pid}:{processPath}",
+                Pid = pid,
+                ProcessPath = processPath,
+                FilePath = processPath,
+                IsolatedPath = quarantinePath,
+                ProcessKilled = killed,
+                SignatureText = signatureText,
+                Details = summary,
+            };
+
+            var json = JsonSerializer.Serialize(alert, IpcProtocol.JsonOptions);
+            PanelPipeClient.TrySend(IpcProtocol.MessageKind.WinlockAlert, json, TimeSpan.FromSeconds(3));
+            _logger.Info(LogCategory.Realtime,
+                $"WinlockShield: алерт отправлен (pid={pid}, path='{processPath}', killed={killed}).");
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(LogCategory.Realtime, "WinlockShield: отправка алерта: " + ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// 3.0.1.6 (P2-1): публичная обёртка ремонта точки входа Windows для ServiceHost
+    /// (вызывается при входе пользователя OnUserSessionLogon).
+    /// </summary>
+    public void RepairWinlogonShellNow()
+    {
+        RepairWinlogonShellIfHijacked();
+    }
+
+    /// <summary>
+    /// 3.0.1.6 (P2-1): жёсткое восстановление точки входа Windows (Winlogon\Shell/Userinit).
+    /// Баннер-блокировщик подменяет Shell/Userinit (в т.ч. кириллическим маскарадом
+    /// «C:\WINDОWS\ехрlоrеr.exe») — после перезагрузки Windows запускает подменённую
+    /// оболочку (файл в карантине) и рабочий стол не появляется (лог ВМ 16.10: explorer
+    /// запускался как обычный процесс, пуск/ярлыки отсутствовали до ручного перезапуска).
+    /// Жёсткий режим (одобрен пользователем): восстанавливаем при ЛЮБОМ отличии от
+    /// валидного explorer.exe — Shell = explorer.exe, Userinit = системный userinit.
+    /// </summary>
+    private void RepairWinlogonShellIfHijacked()
+    {
+        try
+        {
+            if (!_config.WinlockShieldEnabled)
+            {
+                return;
+            }
+
+            const string winlogonKey = @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon";
+            using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(winlogonKey, writable: true);
+            if (key is null)
+            {
+                return;
+            }
+
+            var systemRoot = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+
+            // --- Shell: жёстко — любое отличие от валидного explorer.exe → explorer.exe. ---
+            var shellRaw = key.GetValue("Shell") as string;
+            if (!string.IsNullOrWhiteSpace(shellRaw))
+            {
+                var anomalies = WinlogonGuard.CheckShell(shellRaw, systemRoot);
+                if (anomalies.Count > 0)
+                {
+                    BackupWinlogonValue("Shell", shellRaw);
+                    key.SetValue("Shell", "explorer.exe");
+                    _logger.Warning(LogCategory.Realtime,
+                        $"WinlogonShield: Winlogon\\Shell восстановлен: '{shellRaw}' → 'explorer.exe' " +
+                        $"({anomalies[0].Reason}).");
+                }
+            }
+
+            // --- Userinit: вырезаем вредоносные команды, гарантируем системный userinit. ---
+            var userinitRaw = key.GetValue("Userinit") as string;
+            if (!string.IsNullOrWhiteSpace(userinitRaw))
+            {
+                var anomalies = WinlogonGuard.CheckUserinit(userinitRaw, systemRoot);
+                if (anomalies.Count > 0)
+                {
+                    var repaired = RepairUserinitValue(userinitRaw, systemRoot);
+                    BackupWinlogonValue("Userinit", userinitRaw);
+                    key.SetValue("Userinit", repaired);
+                    _logger.Warning(LogCategory.Realtime,
+                        $"WinlogonShield: Winlogon\\Userinit восстановлен: '{userinitRaw}' → '{repaired}' " +
+                        $"({anomalies[0].Reason}).");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(LogCategory.Realtime, "WinlogonShield: ремонт Winlogon\\Shell/Userinit: " + ex.Message);
+        }
+    }
+
+    /// <summary>3.0.1.6 (P2-1): бэкап исходного значения Winlogon перед восстановлением
+    /// (ключ в настройках службы — для ручного отката/диагностики).</summary>
+    private void BackupWinlogonValue(string valueName, string rawValue)
+    {
+        try
+        {
+            _service.Config.SetSetting("winlogon_shell_backup:" + valueName, rawValue);
+        }
+        catch
+        {
+            // Бэкап не критичен — восстановление уже выполнено.
+        }
+    }
+
+    /// <summary>3.0.1.6 (P2-1): ремонт Winlogon\Userinit — оставляет только системный
+    /// userinit.exe, вырезает вредоносные команды (в т.ч. кириллический маскарад).</summary>
+    private static string RepairUserinitValue(string rawValue, string systemRoot)
+    {
+        var kept = new List<string>();
+        foreach (var cmd in CommandLineParser.ParseCommands(rawValue))
+        {
+            var resolved = cmd.Resolved;
+            var isSystemUserinit =
+                string.Equals(resolved, Path.Combine(systemRoot, "System32", "userinit.exe"),
+                    StringComparison.OrdinalIgnoreCase)
+                || string.Equals(resolved, "userinit.exe", StringComparison.OrdinalIgnoreCase);
+            if (isSystemUserinit)
+            {
+                kept.Add(cmd.Raw);
+            }
+        }
+
+        if (kept.Count == 0)
+        {
+            kept.Add("userinit.exe,");
+        }
+
+        var repaired = string.Join(",", kept);
+        if (!repaired.EndsWith(","))
+        {
+            repaired += ",";
+        }
+        return repaired;
+    }
+
+
+    /// <summary>3.0.1.6 (P2-2): PID первого процесса explorer.exe в указанной сессии (0 — нет).</summary>
+    private static int FindExplorerPidInSession(int sessionId)
+    {
+        try
+        {
+            foreach (var p in Process.GetProcessesByName("explorer"))
+            {
+                try
+                {
+                    if (p.SessionId == sessionId)
+                    {
+                        return p.Id;
+                    }
+                }
+                catch { /* процесс завершился */ }
+                finally { try { p.Dispose(); } catch { } }
+            }
+        }
+        catch { /* перечисление недоступно */ }
+        return 0;
     }
 
     /// <summary>Обрабатывает решение панели по алерту шифровальщика (3.0.0.8).</summary>
@@ -2478,7 +3467,7 @@ public sealed class AntivirusRunner : IDisposable
         var needed = _config.MonitorAutoStart || _config.WinlockProtectionEnabled;
         if (needed && _autoStartMonitor is null)
         {
-            _autoStartMonitor = new AutoStartMonitor(_config, _logger, _scanner, _processRegistry);
+            _autoStartMonitor = new AutoStartMonitor(_config, _logger, _scanner, _processRegistry, _quarantine);
             _autoStartMonitor.Start();
         }
         else if (needed && _autoStartMonitor is not null)
@@ -2493,6 +3482,1119 @@ public sealed class AntivirusRunner : IDisposable
             _autoStartMonitor.Dispose();
             _autoStartMonitor = null;
             _logger.Info(LogCategory.Realtime, Tr.T("Svc2258"));
+        }
+    }
+
+    /// <summary>
+    /// 3.0.1.6 (требование B): Winlock Shield — детектор блокировки экрана.
+    /// Независим от «Контроля автозагрузки»: работает по поллингу окон активной сессии,
+    /// не требует ETW/PreScan/панели. При детекте — kill + BlockInput(false) + восстановление
+    /// Explorer выполняет сам монитор; здесь — карантин + Remember + событие + алерт.
+    /// </summary>
+    private void SyncWinlockShield()
+    {
+        // W3-6 (3.0.1.6): служебный WinlockShieldMonitor работает в session 0 и СЛЕП к окнам
+        // сессии 1 — он никогда не находил баннер, но шумел «EnumWindows пуст / окно-кандидат
+        // не найдено» каждые 30 с (ВМ3). Детекция окон — у per-session агента TrayHost
+        // (WinlockShieldDetector), fallback — ServiceHost.WinlockShieldFallback (P0 3.8).
+        // Здесь остаётся только обработка IPC (HandleWinlockDetected/HandleWinlockSoft) с
+        // карантином + событием, а не дублирующий слепой поллинг.
+        if (_winlockShield is not null)
+        {
+            _winlockShield.Dispose();
+            _winlockShield = null;
+            _logger.Info(LogCategory.Realtime,
+                "WinlockShield: служебный детектор (session 0) отключён — оконный детектор — TrayHost.");
+        }
+    }
+
+    /// <summary>Обработчик детекта блокировки экрана: карантин + Remember + событие.
+    /// Разблокировка (kill/BlockInput/Explorer) уже выполнена <see cref="WinlockShieldMonitor"/>.</summary>
+    private void OnWinlockScreenLocked(WinlockShieldIncident incident)
+    {
+        try
+        {
+            var path = incident.ExecutablePath;
+            if (!string.IsNullOrWhiteSpace(path) && File.Exists(path))
+            {
+                try
+                {
+                    _quarantine.MoveToQuarantine(path, "Winlock.Shield", DetectionType.Virus);
+                }
+                catch (Exception ex)
+                {
+                    _logger.Warning(LogCategory.Realtime, "WinlockShield: карантин файла: " + ex.Message);
+                }
+
+                if (_hashIndex is not null)
+                {
+                    _ = _hashIndex.RememberAsync(path, "Winlock.Shield");
+                }
+            }
+
+            _logger.Error(LogCategory.Realtime,
+                $"WINLOCK-SHIELD: экран разблокирован (виновник: {incident.ProcessName}, pid={incident.ProcessId}, " +
+                $"path='{path}', explorerMissing={incident.ExplorerKilled}).");
+
+            try
+            {
+                _service.Events.Add(new EventRecord
+                {
+                    Source = EventSource.Winlock,
+                    Type = ChangeType.Malicious,
+                    Target = path ?? incident.ProcessName,
+                    Detail = "Блокировка экрана снята (Winlock Shield)",
+                    OccurredAt = DateTime.UtcNow,
+                    Status = EventStatus.Pending,
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.Warning(LogCategory.Realtime, "WinlockShield: запись события: " + ex.Message);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(LogCategory.Realtime, "WinlockShield: обработка детекта: " + ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// 3.0.1.6 (P0 3.7): winlock_detected от per-session агента TrayHost (HARD signal).
+    /// Служба (SYSTEM) выполняет: валидация PID-жертвы по пути → KillTree (Win32, 3.12) →
+    /// карантин + Remember → восстановление Explorer в явной сессии → событие + алерт.
+    /// Возвращает "" при принятии, текст ошибки при отказе.
+    /// </summary>
+    public string HandleWinlockDetected(int pid, string processPath, bool explorerMissing, bool taskbarHidden, int sessionId, long hwnd, int signals)
+    {
+        try
+        {
+            // W3-5 (3.0.1.6): фактический путь как источник истины. В ВМ3 TrayHost не мог
+            // прочитать MainModule elevated-панели (path=''), а служба SYSTEM — может;
+            // ПРИ ЭТОМ PID-reuse сверка с пустым expectedPath молча отменяла kill.
+            // Теперь: actualPath (MainModule + QueryFullProcessImageName) → killPath.
+            var actualPath = TryResolveProcessPath(pid);
+            var killPath = string.IsNullOrWhiteSpace(actualPath) ? processPath : actualPath;
+
+            // 1) Собственные процессы (панель/TrayHost/Privileged/служба/AMSI) — НИКОГДА не kill.
+            //    В ВМ3 детектор слал HARD на собственную панель pid=3080 с path='' — без этой
+            //    защиты служба могла убить собственный UI (фактически не убила случайно).
+            if (IsWinlockOwnProcess(killPath, pid))
+            {
+                _logger.Warning(LogCategory.Realtime,
+                    $"WINLOCK-SHIELD: отказ kill собственного процесса: pid={pid} path='{killPath}'");
+                return "own_process";
+            }
+
+            // 2) Критический список — никогда не kill.
+            if (IsCriticalProcessPath(killPath))
+            {
+                _logger.Warning(LogCategory.Realtime,
+                    $"WINLOCK-SHIELD: отказ kill критического процесса: pid={pid} path='{killPath}'");
+                return "critical_process";
+            }
+
+            // 2.1) P4-C: whitelist пользователя («Добавить в доверенные») — kill ДО его
+            // выполнения. Раньше whitelist проверял только TrayHost (IsWhitelisted по path),
+            // а он не читал путь elevated-процессов (path='') — детекты шли дальше по PID,
+            // и Taskmgr.exe убивался 3 раза даже после добавления в доверенные (ВМ3).
+            if (!string.IsNullOrWhiteSpace(killPath) && IsWinlockWhitelisted(killPath))
+            {
+                _logger.Warning(LogCategory.Realtime,
+                    $"WINLOCK-SHIELD: процесс в whitelist пользователя ('{killPath}') — kill отменён.");
+                return "whitelisted";
+            }
+
+            // P18 (КРИТИЧЕСКОЕ): процесс с ВАЛИДНОЙ цифровой подписью (любой доверенный
+            // издатель, не только Microsoft) НЕ может быть баннером-блокировщиком — баннеры
+            // не подписываются. Защита от ложных HARD детектора (ВМ 21.10: 7zFM.exe убит
+            // из-за глобального флага hijackedAny). Легитимное ПО (7-Zip, браузеры и т.п.)
+            // не должно удаляться даже при ложном срабатывании.
+            if (!string.IsNullOrWhiteSpace(killPath) && File.Exists(killPath) && IsValidlySignedFile(killPath))
+            {
+                _logger.Warning(LogCategory.Realtime,
+                    $"WINLOCK-SHIELD: процесс ПОДПИСАН ('{killPath}') — kill отменён (подписанный процесс не баннер).");
+                return "signed_process";
+            }
+
+            // P19 (Q4): инвалидируем «чистый» вердикт кэша — clamd мог пометить файл чистым
+            // (0 детекций), а winlock-детектор нашёл его баннером (ВМ 21.10: video_xxx.exe и
+            // маскарад ехрlоrеr.exe помечены IsClean:true в launch_verdicts.json). Иначе
+            // повторный запуск не сканировался бы и не алертился.
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(killPath))
+                {
+                    _realTime?.VerdictCache?.MarkInfected(killPath);
+                }
+            }
+            catch { /* кэш недоступен — не критично */ }
+
+            // 3) PID-reuse сверка (когда оба пути доступны).
+            if (!string.IsNullOrWhiteSpace(actualPath)
+                && !string.IsNullOrWhiteSpace(processPath)
+                && !string.Equals(actualPath, processPath, StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.Warning(LogCategory.Realtime,
+                    $"WINLOCK-SHIELD: PID {pid} переиспользован (путь '{actualPath}' ≠ '{processPath}') — kill пропущен.");
+                return "pid_reused";
+            }
+
+            // 3.9) P6-B (3.0.1.6-p6): родитель баннера захватывается ДО kill — после
+            // KillProcessTreeWin32(pid, ...) сам pid недоступен (GetParentProcessId → 0),
+            // а dropper пересоздаёт баннер (лог ВМ5: 4 алерта). Путь резолвится, пока
+            // родитель жив. Гейт — только флаг конфига, НЕ «killed».
+            int? parentPid = null;
+            string? parentPath = null;
+            if (_config.WinlockShieldKillParent)
+            {
+                var pp = GetParentProcessId(pid);
+                if (pp > 0 && pp != pid)
+                {
+                    parentPid = pp;
+                    parentPath = TryResolveProcessPath(pp);
+                    // P13: родитель мог завершиться до резолва (в журналах ВМ2 parentPath='')
+                    // — путь остаётся в ProcessPathCache (записан при запуске родителя,
+                    // HandleProcessLaunch → ProcessPathCache.Record). Это ТОЧНЫЙ путь
+                    // первоисточника (video_xxx.exe) — без эвристики «компаньон по размеру»
+                    // и без риска ложных срабатываний.
+                    if (string.IsNullOrWhiteSpace(parentPath))
+                    {
+                        parentPath = ProcessPathCache.Get(pp);
+                        if (!string.IsNullOrWhiteSpace(parentPath))
+                        {
+                            _logger.Info(LogCategory.Realtime,
+                                $"WINLOCK-SHIELD: путь родителя (источника) взят из кэша процессов: " +
+                                $"parentPid={pp} path='{parentPath}'.");
+                        }
+                    }
+                }
+            }
+
+            // 4) KillTree — ТОЛЬКО с верифицированным путём (KillProcessTreeWin32 вернёт false
+            //    при пустом expectedPath — не убиваем по голому PID).
+            var killed = false;
+            if (_config.WinlockShieldAutoKill && pid > 0)
+            {
+                if (string.IsNullOrWhiteSpace(killPath))
+                {
+                    _logger.Warning(LogCategory.Realtime,
+                        $"WINLOCK-SHIELD: kill отменён: путь процесса pid={pid} не определён (cannot_resolve). " +
+                        "Требуется вмешательство — баннер мог скрыть свой процесс.");
+                    return "cannot_resolve";
+                }
+                killed = KillProcessTreeWin32(pid, killPath);
+            }
+
+            // 4.1) P6-B: родитель (dropper) убивается ПЕРВЫМ — KillProcessTreeWin32(parentPid)
+            // покрывает и баннер (он ребёнок родителя); kill баннера выше остаётся fallback'ом
+            // на случай, если родитель отсечён проверками. Проверки — ТОЛЬКО путь+подпись:
+            // IsCriticalProcessPath (легитимный explorer = %SystemRoot%\explorer.exe + подпись MS
+            // уже покрывает), IsWinlockOwnProcess, IsWinlockWhitelisted. Именные проверки
+            // (IsSystemUtilityPath/IsExplorerPath) НЕ используем — обход переименованием.
+            if (parentPid is > 0 && !string.IsNullOrWhiteSpace(parentPath)
+                && !IsWinlockOwnProcess(parentPath, parentPid.Value)
+                && !IsCriticalProcessPath(parentPath)
+                && !IsWinlockWhitelisted(parentPath))
+            {
+                var parentKilled = KillProcessTreeWin32(parentPid.Value, parentPath);
+                _logger.Error(LogCategory.Realtime,
+                    $"WINLOCK-SHIELD: родитель баннера убит: parentPid={parentPid} path='{parentPath}' killed={parentKilled}");
+            }
+            else
+            {
+                // P12-C (3.0.1.6-p12): причина, почему родитель не убит — видна в логе
+                // (ВМ3: dropper'ы Temp\*.tmp.exe пересоздавали баннер, «родитель баннера убит»
+                // ни разу не появился — dropper не прямой родитель либо уже мёртв).
+                // P13: «родитель не убит» — штатный случай (родитель-создатель мёртв,
+                // путь берётся из кэша процессов), поэтому уровень — Info, а не Warning.
+                _logger.Info(LogCategory.Realtime,
+                    $"WINLOCK-SHIELD: родитель баннера НЕ убит (parentPid={parentPid}, parentPath='{parentPath}') — " +
+                    "ищу dropper'ы/источник в риск-зонах.");
+            }
+
+            // P14: dropper'ы/источник ищем ВСЕГДА (не только когда родитель не убит) —
+            // вирус в памяти пересоздаёт баннер, пока жив процесс-создатель (ВМ 19.10:
+            // E05B.tmp.exe/CDF8.tmp.exe карантинились как файлы, а создатель оставался жив).
+            KillTempDroppers();
+
+            // 5) P14: СНАЧАЛА хэшируем (пока файл существует), ПОТОМ карантин.
+            // Критический баг P7-C: RememberAsync стоял ПОСЛЕ QuarantineFile, и
+            // File.Exists(killPath) был false (файл уже перемещён) — хэш маскарада
+            // НИКОГДА не записывался (hash_threat_index.json пуст, баннер пересоздавался
+            // 3 раза: 10:13/10:22/10:24). Маскарад = копия video_xxx.exe (220 КБ, одинаковый
+            // titleHash) — хэш маскарада = хэш источника, повторный запуск убивается по
+            // хэшу ДО создания маскарада.
+            if (!string.IsNullOrWhiteSpace(killPath) && File.Exists(killPath) && _hashIndex is not null)
+            {
+                try
+                {
+                    _ = _hashIndex.RememberAsync(killPath, "Winlock.Shield");
+                    _logger.Error(LogCategory.Realtime,
+                        $"WINLOCK-SHIELD: маскарад баннера запомнен по хэшу: '{killPath}'.");
+                }
+                catch { }
+            }
+
+            // P14: первоисточник (родитель маскарада) — хэшируем, если это НЕ сам маскарад
+            // (в журналах ВМ parentPath из кэша = ехрlоrеr.exe — PID-reuse/самовоспроизведение).
+            var sourcePath = string.IsNullOrWhiteSpace(parentPath)
+                ? null
+                : (string.Equals(parentPath, killPath, StringComparison.OrdinalIgnoreCase) ? null : parentPath);
+            if (sourcePath is not null && File.Exists(sourcePath) && _hashIndex is not null)
+            {
+                try
+                {
+                    _ = _hashIndex.RememberAsync(sourcePath, "Winlock.Shield");
+                    _logger.Error(LogCategory.Realtime,
+                        $"WINLOCK-SHIELD: первоисточник баннера запомнен по хэшу: '{sourcePath}'.");
+                }
+                catch { }
+            }
+            else
+            {
+                // P14: источник не определён (родитель пуст/== маскарад/файл исчез) —
+                // детерминированный резерв: риск-зоны с жёсткими фильтрами
+                // (неподписанный + свежесозданный), без ratio. Вызывается ВСЕГДА в этом случае.
+                TryRememberRiskZoneSources(killPath);
+            }
+
+            // 5.1) Карантин. P4-D: результат передаётся в алерт — если карантин не удался
+            // (Access denied — системный файл защищён), алерт НЕ пишет «Файл перемещён в карантин».
+            var quarantined = false;
+            if (!string.IsNullOrWhiteSpace(killPath) && File.Exists(killPath))
+            {
+                quarantined = QuarantineFile(killPath, "Winlock.Shield");
+            }
+
+            // 5.1) Алерт WinlockShield (P1-3): уведомление с кнопками «Добавить в доверенные» /
+            // «Оставить изолированным» / «Закрыть» (P14: кнопка «Удалить файл» убрана).
+            SendWinlockShieldAlert(pid, killPath, sessionId, signals, killed, quarantined);
+
+            // 5.2) P7-D: ремонт точки входа и восстановление Explorer — в ФОНЕ (Task.Run).
+            // Раньше синхронное Repair+Restore блокировало обработчик IPC на десятки секунд —
+            // повторные детекты и АЛЕРТЫ стояли в очереди (ВМ6: kill 20:05:55, алерт только
+            // 20:06:24 — 29 с), а живой баннер топмостом перекрывал окно панели.
+            _ = Task.Run(() =>
+            {
+                try { RepairWinlogonShellIfHijacked(); } catch { }
+            });
+
+            // 6) Восстановление Explorer в ЯВНОЙ сессии из IPC.
+            // W3-9 (3.0.1.6-fix): восстанавливаем по ФАКТИЧЕСКОМУ состоянию, а не по флагу
+            // из IPC — на момент детекта explorer мог быть жив, но баннер убил его после
+            // kill (лог ВМ 15.10: explorerMissing=False в детекте, explorerMissing=True
+            // через ~1.5 с). Восстановление — только легитимного explorer (подпись + эталон).
+            // P2-2/P3-2: если explorer запущен, но НЕ как оболочка (панель задач отсутствует) —
+            // перезапускаем его как оболочку. Решение — по факту процесса (Process видит все
+            // сессии) и сигналу TrayHost «таскбар скрыт» (своя проверка EnumWindows из session 0
+            // НЕ видит окна session 1 и всегда давала false → убивали здоровый explorer).
+            if (_config.WinlockShieldRestoreExplorer
+                && (!IsExplorerRunningInSession(sessionId) || taskbarHidden))
+            {
+                // P7-D: восстановление Explorer — в фоне (не блокируем обработчик IPC).
+                var sid = sessionId;
+                var th = taskbarHidden;
+                _ = Task.Run(() =>
+                {
+                    try { RestoreExplorerInSession(sid, th); }
+                    catch (Exception ex)
+                    {
+                        // P10-C: причина видна в логе (раньше catch был молчаливым).
+                        _logger.Error(LogCategory.Realtime,
+                            "WinlockShield: восстановление Explorer упало: " + ex.Message);
+                    }
+                });
+            }
+            else if (_config.WinlockShieldRestoreExplorer)
+            {
+                // P10-C: explorer жив и таскбар не скрыт — восстановление не требуется
+                // (ВМ 17.10: пользователь сам запустил explorer через диспетчер задач).
+                _logger.Info(LogCategory.Realtime,
+                    "WinlockShield: Explorer уже запущен в сессии — восстановление не требуется.");
+            }
+
+            // 7) Честные логи: «экран разблокирован» — только при реальном kill или автоKill=off.
+            if (killed)
+            {
+                _logger.Error(LogCategory.Realtime,
+                    $"WINLOCK-SHIELD: экран разблокирован (TrayHost): pid={pid} path='{killPath}' " +
+                    $"explorerMissing={explorerMissing} signals={signals}.");
+            }
+            else if (_config.WinlockShieldAutoKill)
+            {
+                _logger.Warning(LogCategory.Realtime,
+                    $"WINLOCK-SHIELD: kill не выполнен (процесс уже завершился?): pid={pid} path='{killPath}'.");
+            }
+
+            try
+            {
+                _service.Events.Add(new EventRecord
+                {
+                    Source = EventSource.Winlock,
+                    Type = ChangeType.Malicious,
+                    Target = string.IsNullOrWhiteSpace(killPath) ? pid.ToString() : killPath,
+                    Detail = killed
+                        ? "Блокировка экрана снята (Winlock Shield, TrayHost)"
+                        : "Блокировка экрана: kill не выполнен (путь не определён)",
+                    OccurredAt = DateTime.UtcNow,
+                    Status = EventStatus.Pending,
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.Warning(LogCategory.Realtime, "WinlockShield: запись события: " + ex.Message);
+            }
+
+            return "";
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(LogCategory.Realtime, "WINLOCK-SHIELD: обработка winlock_detected: " + ex.Message);
+            return "error";
+        }
+    }
+
+    /// <summary>
+    /// P13: резерв-детерминированное запоминание первоисточников баннера в риск-зонах
+    /// (Desktop/Downloads/Documents/%TEMP%/папка баннера). Вызывается ТОЛЬКО когда точный
+    /// источник (родитель маскарада из <see cref="ProcessPathCache"/>) не найден.
+    /// В отличие от старой ratio-эвристики (TryRememberCompanionMalware), НЕ гадаем по
+    /// размеру — фильтр: неподписанный + свежеСОЗДАННЫЙ (≤10 мин) + исполняемое расширение
+    /// + не свой/не критический/не whitelist. Это ловит video_xxx.exe при любом размере
+    /// маскарада и НЕ помечает легитимные (подписанные/старые) файлы.
+    /// </summary>
+    private void TryRememberRiskZoneSources(string? bannerPath)
+    {
+        try
+        {
+            if (_hashIndex is null) return;
+
+            var dirs = new List<string>();
+            if (!string.IsNullOrWhiteSpace(bannerPath))
+            {
+                var d = Path.GetDirectoryName(bannerPath)?.TrimEnd('\\', '/');
+                if (!string.IsNullOrWhiteSpace(d)) dirs.Add(d!);
+            }
+            var desktop = Environment.GetFolderPath(Environment.SpecialFolder.Desktop)?.TrimEnd('\\', '/');
+            var downloads = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads")?.TrimEnd('\\', '/');
+            var documents = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments)?.TrimEnd('\\', '/');
+            var temp = Path.GetTempPath().TrimEnd('\\', '/');
+            foreach (var d in new[] { desktop, downloads, documents, temp })
+            {
+                if (!string.IsNullOrWhiteSpace(d)
+                    && !dirs.Contains(d, StringComparer.OrdinalIgnoreCase))
+                {
+                    dirs.Add(d);
+                }
+            }
+
+            var cutoff = DateTime.UtcNow.AddMinutes(-10);
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var dir in dirs)
+            {
+                if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) continue;
+                foreach (var f in Directory.EnumerateFiles(dir, "*", SearchOption.TopDirectoryOnly))
+                {
+                    try
+                    {
+                        if (!seen.Add(f)) continue;
+                        if (f.Equals(bannerPath, StringComparison.OrdinalIgnoreCase)) continue;
+                        var fi = new FileInfo(f);
+                        var ext = fi.Extension.ToLowerInvariant();
+                        if (ext is not (".exe" or ".scr" or ".com" or ".pif" or ".bat" or ".cmd" or ".msi")) continue;
+                        // Источник только что появился — фильтруем по СозДАНИЮ, не по изменению.
+                        if (fi.CreationTimeUtc < cutoff) continue;
+                        if (IsWinlockOwnProcess(f, 0)) continue;
+                        if (IsCriticalProcessPath(f)) continue;
+                        if (IsWinlockWhitelisted(f)) continue;
+                        // Подписанный файл — доверенный, не помечаем (защита от ложных срабатываний).
+                        if (IsValidlySignedFile(f)) continue;
+                        _ = _hashIndex.RememberAsync(f, "Winlock.Shield");
+                        _logger.Error(LogCategory.Realtime,
+                            $"WINLOCK-SHIELD: первоисточник баннера запомнен по хэшу (риск-зона): " +
+                            $"'{f}' (создан {fi.CreationTimeUtc:HH:mm:ss}).");
+                    }
+                    catch { /* файл занят/удалён */ }
+                }
+            }
+        }
+        catch
+        {
+            // Резерв-эвристика некритична — маскарад уже запомнен выше.
+        }
+    }
+
+    /// <summary>
+    /// P12-C (3.0.1.6-p12) + P13: убивает свежие dropper'ы/первоисточники в риск-зонах
+    /// — %TEMP% (Temp\*.tmp.exe, классические dropper'ы: ВМ3 8593/72E2/6011/4D03/3A71/
+    /// 8ABF/79C4/681D/5675/44AF/324C) + Desktop/Downloads (video_xxx.exe — первоисточник
+    /// баннера, если он ещё запущен). Только процессы, запущенные недавно (≤10 мин),
+    /// не критические/свои/whitelist. В Desktop/Downloads — дополнительно только
+    /// неподписанные (легитимный запущенный софт не трогаем).
+    /// </summary>
+    private void KillTempDroppers()
+    {
+        try
+        {
+            var temp = Path.GetTempPath().TrimEnd('\\', '/');
+            var desktop = Environment.GetFolderPath(Environment.SpecialFolder.Desktop)?.TrimEnd('\\', '/');
+            var downloads = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                "Downloads")?.TrimEnd('\\', '/');
+            var roots = new[] { temp, desktop, downloads }
+                .Where(d => !string.IsNullOrWhiteSpace(d))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            var now = DateTime.UtcNow;
+            foreach (var p in System.Diagnostics.Process.GetProcesses())
+            {
+                try
+                {
+                    if (p.Id == Environment.ProcessId) continue;
+                    string? path;
+                    try { path = p.MainModule?.FileName; } catch { path = null; }
+                    if (string.IsNullOrWhiteSpace(path)) continue;
+                    var full = Path.GetFullPath(path);
+                    if (!roots.Any(r => full.StartsWith(r + "\\", StringComparison.OrdinalIgnoreCase))) continue;
+                    var name = Path.GetFileName(full);
+                    if (!name.EndsWith(".tmp.exe", StringComparison.OrdinalIgnoreCase)
+                        && !name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (IsWinlockOwnProcess(full, p.Id)) continue;
+                    if (IsCriticalProcessPath(full)) continue;
+                    if (IsWinlockWhitelisted(full)) continue;
+                    if ((now - p.StartTime.ToUniversalTime()).TotalMinutes > 10) continue;
+                    // P13: в Desktop/Downloads — только неподписанные (защита от убийства
+                    // легитимного подписанного приложения, запущенного пользователем).
+                    if (!full.StartsWith(temp + "\\", StringComparison.OrdinalIgnoreCase)
+                        && IsValidlySignedFile(full)) continue;
+                    var killed = KillProcessTreeWin32(p.Id, full);
+                    _logger.Error(LogCategory.Realtime,
+                        $"WINLOCK-SHIELD: dropper/источник в риск-зоне убит: pid={p.Id} path='{full}' killed={killed}");
+                    // P14: найти и убить СОЗДАТЕЛЯ dropper'а (кто его запустил) — вирус в памяти
+                    // пересоздаёт dropper'ы, пока жив процесс-создатель (ВМ 19.10: E05B.tmp.exe).
+                    if (killed)
+                    {
+                        KillProcessCreatorChain(p.Id, full);
+                    }
+                }
+                catch { /* процесс завершился/нет прав */ }
+                finally { try { p.Dispose(); } catch { } }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(LogCategory.Realtime, "WINLOCK-SHIELD: поиск dropper'ов: " + ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// P14: находит и убивает ЦЕПОЧКУ создателей процесса (до 3 уровней вверх по дереву
+    /// родителей), если они не легитимны. Отвечает на вопрос «КТО создал и запустил dropper?»:
+    /// каждый убитый создатель логируется с путём и PID. Легитимные (свои/критические/
+    /// whitelist/подписанные) не трогаются.
+    /// </summary>
+    private void KillProcessCreatorChain(int childPid, string childPath)
+    {
+        var currentPid = childPid;
+        var currentPath = childPath;
+        for (int level = 0; level < 3; level++)
+        {
+            try
+            {
+                var pp = GetParentProcessId(currentPid);
+                if (pp <= 0 || pp == currentPid) break;
+                var ppPath = TryResolveProcessPath(pp);
+                if (string.IsNullOrWhiteSpace(ppPath)) ppPath = ProcessPathCache.Get(pp);
+                if (string.IsNullOrWhiteSpace(ppPath)) break;
+                if (IsWinlockOwnProcess(ppPath, pp)) break;
+                if (IsCriticalProcessPath(ppPath)) break;
+                if (IsWinlockWhitelisted(ppPath)) break;
+                if (IsValidlySignedFile(ppPath)) break; // легитимный подписанный — не трогаем
+                var killed = KillProcessTreeWin32(pp, ppPath);
+                _logger.Error(LogCategory.Realtime,
+                    $"WINLOCK-SHIELD: создатель dropper'а убит: level={level + 1} pid={pp} path='{ppPath}' " +
+                    $"(создал '{currentPath}') killed={killed}");
+                currentPid = pp;
+                currentPath = ppPath;
+            }
+            catch
+            {
+                break; // процесс завершился/нет прав — цепочка обрывается
+            }
+        }
+    }
+
+    /// <summary>P13: валидная цифровая подпись (WinVerifyTrust) — файл доверенный.
+    /// Используется фильтром риск-зон, чтобы НЕ помечать легитимные файлы как источник
+    /// баннера (защита от ложных срабатываний).</summary>
+    private static bool IsValidlySignedFile(string path)
+    {
+        try
+        {
+            var info = CatGuardian.Antivirus.Core.Signing.DigitalSignatureVerifier.Check(path);
+            return info.Result == CatGuardian.Antivirus.Core.Signing.VerifyResult.SignOk;
+        }
+        catch
+        {
+            return false; // ошибка проверки — считаем неподписанным (безопасная сторона)
+        }
+    }
+
+    /// <summary>3.0.1.6 (P0 3.7): winlock_soft — SOFT signal. D8d: при signals >= порога
+    /// эскалируется в kill (баннер с несколькими признаками блокировки).
+    /// W3-8 (3.0.1.6-fix): порог снижен 4 → 3 и добавлена эскалация по маскараду пути —
+    /// баннеры-маскарады (ехрlоrеr.exe в C:\WINDОWS) давали ровно 3 сигнала (fullscreen +
+    /// focusHold) и оставались на экране (лог ВМ 15.10.2026: SOFT signals=3, kill не выполняется).</summary>
+    public string HandleWinlockSoft(int pid, string processPath, bool explorerMissing, bool taskbarHidden, int sessionId, long hwnd, int signals)
+    {
+        try
+        {
+            // D8d (3.0.1.6): soft-детект с суммой сигналов >= порога — это уже полноценный
+            // баннер (например fullscreenForeground + focusHold + taskbarCovered + noChrome).
+            // Раньше kill НЕ выполнялся вовсе — баннер оставался на экране. Теперь эскалируем
+            // в тот же путь, что и hard (kill + карантин + восстановление Explorer).
+            // W3-8 (3.0.1.6-fix): маскарад пути (кириллические гомоглифы WINDОWS/ехрlоrеr) —
+            // заведомая подмена оболочки — эскалируется при ЛЮБОМ числе сигналов.
+            if (signals >= 3 || MasqueradeNames.IsMasqueradePath(processPath))
+            {
+                _logger.Warning(LogCategory.Realtime,
+                    $"WINLOCK-SHIELD: SOFT детект signals={signals} >= 4 → эскалация в kill: " +
+                    $"pid={pid} path='{processPath}' explorerMissing={explorerMissing}.");
+                return HandleWinlockDetected(pid, processPath, explorerMissing, taskbarHidden, sessionId, hwnd, signals);
+            }
+
+            _logger.Warning(LogCategory.Realtime,
+                $"WINLOCK-SHIELD: SOFT детект (предупреждение): pid={pid} path='{processPath}' " +
+                $"explorerMissing={explorerMissing} signals={signals} — kill не выполняется.");
+            return "";
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(LogCategory.Realtime, "WINLOCK-SHIELD: обработка winlock_soft: " + ex.Message);
+            return "error";
+        }
+    }
+
+    /// <summary>P4-B2: системные утилиты Microsoft, которые пользователь может запустить
+    /// при заблокированном/отсутствующем рабочем столе (в т.ч. когда explorer убит) —
+    /// ДИСПЕТЧЕР ЗАДАЧ и консольные инструменты. Легитимная утилита (System32/SysWOW64 +
+    /// подпись Microsoft) НИКОГДА не убивается: без неё пользователь не восстановит
+    /// систему. Подмена (другой путь/нет подписи Microsoft) под этот список НЕ попадает —
+    /// kill разрешён.</summary>
+    private static readonly HashSet<string> SystemUtilityNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "taskmgr.exe", "cmd.exe", "powershell.exe", "pwsh.exe", "regedit.exe",
+        "mmc.exe", "control.exe", "msconfig.exe", "taskkill.exe", "tasklist.exe",
+        "notepad.exe", "mstsc.exe", "rundll32.exe", "msiexec.exe", "sfc.exe",
+        "dism.exe", "bcdedit.exe", "winver.exe", "wmic.exe", "schtasks.exe",
+        "whoami.exe", "systeminfo.exe", "msinfo32.exe", "sigverif.exe", "cleanmgr.exe",
+        "utilman.exe", "osk.exe", "magnify.exe", "narrator.exe", "eventvwr.exe",
+        "perfmon.exe", "resmon.exe", "dxdiag.exe", "dfrgui.exe", "verifier.exe",
+        "chkdsk.exe", "diskpart.exe", "reg.exe", "sc.exe", "net.exe", "net1.exe",
+        "logoff.exe", "shutdown.exe", "tscon.exe", "tsdiscon.exe", "explorer.exe",
+    };
+
+    /// <summary>Критический список процессов — никогда не kill (раздел 13).</summary>
+    private static bool IsCriticalProcessPath(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return false;
+        }
+
+        var name = Path.GetFileName(path);
+        var windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+        var system32 = Path.Combine(windows, "System32");
+        var syswow64 = Path.Combine(windows, "SysWOW64");
+        var isSystem32 = path.StartsWith(system32, StringComparison.OrdinalIgnoreCase);
+        var isSystemDir = isSystem32
+            || path.StartsWith(syswow64, StringComparison.OrdinalIgnoreCase);
+
+        switch (name.ToLowerInvariant())
+        {
+            case "csrss.exe":
+            case "lsass.exe":
+            case "wininit.exe":
+            case "services.exe":
+            case "smss.exe":
+            case "winlogon.exe":
+            case "fontdrvhost.exe":
+            case "dwm.exe":
+                return true;
+            case "explorer.exe":
+                // D8e (3.0.1.6): легитимный explorer = %SystemRoot%\explorer.exe (НЕ System32!)
+                // с подписью Microsoft → критический (не убивать). Фейковый (другой путь /
+                // невалидная подпись) → kill разрешён. Раньше проверялся System32 — легитимный
+                // explorer (C:\Windows\explorer.exe) мог быть убит (баг).
+                var systemRoot = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+                var canonicalExplorer = Path.Combine(systemRoot, "explorer.exe");
+                return string.Equals(path, canonicalExplorer, StringComparison.OrdinalIgnoreCase)
+                    && IsMicrosoftSignedFile(path);
+            case "svchost.exe":
+                return isSystem32;
+            default:
+                // P4-B2: системные утилиты Microsoft (System32/SysWOW64 + подпись) —
+                // критический список; Taskmgr.exe в ВМ3 убивался 3 раза (pid=6976/5932/1804).
+                // Подмена (chkdsk с кириллическими гомоглифами и т.п.) сюда не попадает —
+                // кириллический путь не StartsWith системного каталога.
+                if (isSystemDir && SystemUtilityNames.Contains(name) && IsMicrosoftSignedFile(path))
+                {
+                    return true;
+                }
+                return false;
+        }
+    }
+
+    /// <summary>P4-C: путь процесса в WinlockShieldWhitelist конфига (решение пользователя
+    /// «Добавить в доверенные»). Проверяется в службе ДО kill — раньше whitelist
+    /// проверялся только в TrayHost, который не читает путь elevated-процессов (path=''),
+    /// и kill продолжался по PID (ВМ3: Taskmgr убит 3 раза после нажатия кнопки).</summary>
+    private bool IsWinlockWhitelisted(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return false;
+        }
+        var norm = path.Trim().TrimEnd('\\');
+        try
+        {
+            return _config.WinlockShieldWhitelist.Any(e =>
+                !string.IsNullOrWhiteSpace(e.Path)
+                && string.Equals(norm, e.Path.Trim().TrimEnd('\\'), StringComparison.OrdinalIgnoreCase));
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>P4-B3: имя файла — системная утилита Microsoft (taskmgr/cmd/powershell и т.п.).</summary>
+    private static bool IsSystemUtilityPath(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return false;
+        }
+        return SystemUtilityNames.Contains(Path.GetFileName(path));
+    }
+
+    /// <summary>P4-B3: SHA-256 файла совпадает с эталоном winlock_shell_baseline.json
+    /// (запись Kind=SystemUtility, снимается мастером/панелью как explorer/userinit).
+    /// Эталона нет / записи нет / ошибка чтения — true (не создаём ложную «подмену»
+    /// из-за обновления Windows; подпись Microsoft уже проверена на верхнем уровне).</summary>
+    private static bool SystemUtilityMatchesBaseline(string path)
+    {
+        try
+        {
+            var baselinePath = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "CatGuardian", "Antivirus", "winlock_shell_baseline.json");
+            if (!File.Exists(baselinePath))
+            {
+                return true;
+            }
+            using var doc = JsonDocument.Parse(File.ReadAllText(baselinePath));
+            if (!doc.RootElement.TryGetProperty("Entries", out var entries)
+                || entries.ValueKind != JsonValueKind.Array)
+            {
+                return true;
+            }
+            foreach (var e in entries.EnumerateArray())
+            {
+                var kind = e.TryGetProperty("Kind", out var k) ? k.GetString() : null;
+                if (!string.Equals(kind, "SystemUtility", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                var p = e.TryGetProperty("Path", out var pp) ? pp.GetString() : null;
+                if (string.IsNullOrWhiteSpace(p)
+                    || !string.Equals(p, path, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                var sha = e.TryGetProperty("Sha256", out var s) ? s.GetString() : null;
+                if (string.IsNullOrWhiteSpace(sha))
+                {
+                    return true;
+                }
+                return string.Equals(ComputeSha256(path), sha, StringComparison.OrdinalIgnoreCase);
+            }
+            return true; // записи для файла нет — полагаемся на подпись
+        }
+        catch
+        {
+            return true; // ошибка чтения эталона — не нагнетаем (подпись уже проверена)
+        }
+    }
+
+    /// <summary>W3-5 (3.0.1.6): собственные процессы CatGuardian — никогда не kill.
+    /// В ВМ3 детектор слал HARD на собственную панель (pid=3080, path='' из-за elevated);
+    /// служба SYSTEM резолвит путь (BaseDirectory = каталог установки службы).</summary>
+    private static readonly string[] WinlockOwnProcessNames =
+    {
+        "CatGuardian", "CatGuardian.TrayHost", "CatGuardian.Service",
+        "CatGuardian.Privileged", "CatGuardian.Amsi", "CatGuardian.Watchdog",
+    };
+
+    private static bool IsWinlockOwnProcess(string? path, int pid)
+    {
+        if (!string.IsNullOrWhiteSpace(path))
+        {
+            var dir = Path.GetFullPath(AppContext.BaseDirectory).TrimEnd('\\', '/');
+            var full = Path.GetFullPath(path).TrimEnd('\\', '/');
+            if (full.Equals(dir, StringComparison.OrdinalIgnoreCase)
+                || full.StartsWith(dir + "\\", StringComparison.OrdinalIgnoreCase))
+            {
+                var name = Path.GetFileNameWithoutExtension(full);
+                foreach (var own in WinlockOwnProcessNames)
+                {
+                    if (string.Equals(name, own, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        // Путь не определён — по имени процесса.
+        try
+        {
+            using var p = Process.GetProcessById(pid);
+            foreach (var own in WinlockOwnProcessNames)
+            {
+                if (string.Equals(p.ProcessName, own, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+        }
+        catch { /* процесс завершился */ }
+        return false;
+    }
+
+    /// <summary>D8e (3.0.1.6): подпись файла валидна И издатель Microsoft.</summary>
+    private static bool IsMicrosoftSignedFile(string path)
+    {
+        try
+        {
+            var info = CatGuardian.Antivirus.Core.Signing.DigitalSignatureVerifier.Check(path);
+            return info.Result == CatGuardian.Antivirus.Core.Signing.VerifyResult.SignOk
+                && info.PublisherName?.Contains("Microsoft", StringComparison.OrdinalIgnoreCase) == true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Резолв пути процесса: Process.MainModule, затем QueryFullProcessImageName
+    /// (PROCESS_QUERY_LIMITED_INFORMATION — службе доступен даже для elevated-процессов).</summary>
+    private static string? TryResolveProcessPath(int pid)
+    {
+        try
+        {
+            using var p = Process.GetProcessById(pid);
+            try
+            {
+                var m = p.MainModule?.FileName;
+                if (!string.IsNullOrWhiteSpace(m))
+                {
+                    return m;
+                }
+            }
+            catch { /* доступ ограничен */ }
+
+            try
+            {
+                var sb = new System.Text.StringBuilder(1024);
+                var size = (uint)sb.Capacity;
+                return QueryFullProcessImageName(p.Handle, 0, sb, ref size) ? sb.ToString() : null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>KillTree через Win32 (3.12): CreateToolhelp32Snapshot + TerminateProcess,
+    /// PID-reuse сверка по пути, сортировка детей ПЕРЕД родителями.
+    /// W3-5: возвращает false и НЕ убивает, если ожидаемый путь не определён (защита
+    /// от kill по голому PID — в ВМ3 kill с path='' молча отменялся сверкой пути).</summary>
+    private static bool KillProcessTreeWin32(int pid, string? expectedPath)
+    {
+        // W3-5: без верифицированного пути не убиваем.
+        if (string.IsNullOrWhiteSpace(expectedPath))
+        {
+            return false;
+        }
+
+        try
+        {
+            var snapshot = NativeKillTree.CreateToolhelp32Snapshot(NativeKillTree.Th32csSnapprocess, 0);
+            if (snapshot == IntPtr.Zero)
+            {
+                return false;
+            }
+
+            try
+            {
+                var entries = new List<NativeKillTree.ProcessEntry>();
+                var entry = new NativeKillTree.ProcessEntry { dwSize = (uint)Marshal.SizeOf<NativeKillTree.ProcessEntry>() };
+                if (NativeKillTree.Process32First(snapshot, ref entry))
+                {
+                    do { entries.Add(entry); }
+                    while (NativeKillTree.Process32Next(snapshot, ref entry));
+                }
+
+                var toKill = new List<NativeKillTree.ProcessEntry>();
+                CollectTree(entries, pid, toKill);
+
+                // PID-reuse сверка по пути.
+                if (expectedPath is not null)
+                {
+                    var actual = TryResolveProcessPath(pid);
+                    if (!string.IsNullOrWhiteSpace(actual)
+                        && !string.Equals(actual, expectedPath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return false;
+                    }
+                }
+
+                // Дети ПЕРЕД родителями (CreationTime descending).
+                foreach (var e in toKill.OrderByDescending(x => x.CreationTimeUtc))
+                {
+                    var handle = NativeKillTree.OpenProcess(NativeKillTree.ProcessTerminate, false, e.th32ProcessID);
+                    if (handle == IntPtr.Zero)
+                    {
+                        continue;
+                    }
+                    try { NativeKillTree.TerminateProcess(handle, 1); }
+                    finally { NativeKillTree.CloseHandle(handle); }
+                }
+
+                return true;
+            }
+            finally
+            {
+                NativeKillTree.CloseHandle(snapshot);
+            }
+        }
+        catch
+        {
+            // fallback: Process.Kill
+            try
+            {
+                using var p = Process.GetProcessById(pid);
+                p.Kill(entireProcessTree: true);
+                return true;
+            }
+            catch { /* процесс уже завершился */ return false; }
+        }
+    }
+
+    private static void CollectTree(
+        List<NativeKillTree.ProcessEntry> all,
+        int parentPid,
+        List<NativeKillTree.ProcessEntry> result)
+    {
+        foreach (var e in all)
+        {
+            if (e.th32ParentProcessID == (uint)parentPid)
+            {
+                CollectTree(all, (int)e.th32ProcessID, result);
+                result.Add(e);
+            }
+        }
+        var self = all.FirstOrDefault(e => e.th32ProcessID == (uint)parentPid);
+        if (self.th32ProcessID != 0)
+        {
+            result.Add(self);
+        }
+    }
+
+    /// <summary>
+    /// W3-9 (3.0.1.6-fix): восстановление Explorer в ЯВНОЙ сессии (SessionProcessLauncher
+    /// с sessionId) — ТОЛЬКО легитимного explorer: файл существует + подпись Microsoft +
+    /// SHA-256 совпадает с эталоном winlock_shell_baseline.json. Иначе можно восстановить
+    /// подменённый explorer (баннер маскируется под него). При несовпадении — НЕ запускаем,
+    /// пишем предупреждение (пользователь увидит, что оболочка не восстановлена).
+    /// </summary>
+    private void RestoreExplorerInSession(int sessionId, bool taskbarHidden)
+    {
+        try
+        {
+            var explorer = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe");
+            if (!File.Exists(explorer))
+            {
+                _logger.Warning(LogCategory.Realtime,
+                    "WinlockShield: восстановление Explorer отменено — файл отсутствует: " + explorer);
+                return;
+            }
+            if (!IsMicrosoftSignedFile(explorer))
+            {
+                _logger.Warning(LogCategory.Realtime,
+                    "WinlockShield: восстановление Explorer отменено — подпись не Microsoft: " + explorer);
+                return;
+            }
+            if (!ExplorerMatchesBaseline(explorer))
+            {
+                _logger.Warning(LogCategory.Realtime,
+                    "WinlockShield: восстановление Explorer отменено — SHA-256 не совпадает с эталоном: " + explorer);
+                return;
+            }
+
+            // P2-2/P3-2: explorer.exe может быть запущен как ОБЫЧНЫЙ процесс, а не как оболочка.
+            // Перезапускаем как оболочку ТОЛЬКО при сигнале TrayHost «таскбар скрыт» (панель
+            // есть, но скрыта баннером). Проверка EnumWindows из session 0 НЕ видит окна
+            // session 1 — не используем её для решения об убийстве живого explorer (P3-2:
+            // убивали здоровый explorer и запускали его от SYSTEM → systemprofile desktop).
+            var explorerPid = FindExplorerPidInSession(sessionId);
+            if (explorerPid > 0 && !taskbarHidden)
+            {
+                _logger.Info(LogCategory.Realtime,
+                    $"WinlockShield: Explorer pid={explorerPid} активен как оболочка (таскбар на месте) — пропуск перезапуска.");
+                return;
+            }
+            if (explorerPid > 0)
+            {
+                _logger.Warning(LogCategory.Realtime,
+                    $"WinlockShield: Explorer pid={explorerPid} запущен, но панель задач скрыта — перезапуск как оболочки.");
+                try
+                {
+                    using var p = Process.GetProcessById(explorerPid);
+                    p.Kill();
+                }
+                catch { /* процесс уже завершился */ }
+                Thread.Sleep(400);
+            }
+
+            var launched = SessionProcessLauncher.LaunchInActiveSession(explorer, null, (uint)sessionId);
+            if (launched)
+            {
+                _logger.Info(LogCategory.Realtime, "WinlockShield: Explorer восстановлен (подпись + эталон подтверждены).");
+            }
+            else
+            {
+                _logger.Error(LogCategory.Realtime,
+                    "WinlockShield: восстановление Explorer НЕ удалось (LaunchInActiveSession=false).");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(LogCategory.Realtime, "WinlockShield: восстановление Explorer: " + ex.Message);
+        }
+    }
+
+    /// <summary>W3-9: жив ли explorer.exe в указанной сессии (по факту, не по флагу IPC).</summary>
+    private static bool IsExplorerRunningInSession(int sessionId)
+    {
+        try
+        {
+            foreach (var p in Process.GetProcessesByName("explorer"))
+            {
+                try
+                {
+                    if (p.SessionId == sessionId)
+                    {
+                        return true;
+                    }
+                }
+                catch { /* процесс завершился */ }
+                finally { try { p.Dispose(); } catch { } }
+            }
+        }
+        catch { /* перечисление недоступно */ }
+        return false;
+    }
+
+    /// <summary>W3-9: SHA-256 explorer.exe совпадает с эталоном winlock_shell_baseline.json
+    /// (запись Kind=Explorer). Эталона нет / записи нет / ошибка чтения — полагаемся на
+    /// подпись Microsoft (уже проверена выше), не блокируем восстановление.</summary>
+    private static bool ExplorerMatchesBaseline(string path)
+    {
+        try
+        {
+            var baselinePath = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "CatGuardian", "Antivirus", "winlock_shell_baseline.json");
+            if (!File.Exists(baselinePath))
+            {
+                return true;
+            }
+
+            using var doc = JsonDocument.Parse(File.ReadAllText(baselinePath));
+            if (!doc.RootElement.TryGetProperty("Entries", out var entries)
+                || entries.ValueKind != JsonValueKind.Array)
+            {
+                return true;
+            }
+
+            foreach (var e in entries.EnumerateArray())
+            {
+                var kind = e.TryGetProperty("Kind", out var k) ? k.GetString() : null;
+                if (!string.Equals(kind, "Explorer", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                var sha = e.TryGetProperty("Sha256", out var s) ? s.GetString() : null;
+                if (string.IsNullOrWhiteSpace(sha))
+                {
+                    return true;
+                }
+                var actual = ComputeSha256(path);
+                return string.Equals(actual, sha, StringComparison.OrdinalIgnoreCase);
+            }
+
+            return true; // записи Explorer в эталоне нет — полагаемся на подпись
+        }
+        catch
+        {
+            return true; // ошибка чтения эталона — не блокируем (подпись уже проверена)
+        }
+    }
+
+    private static string ComputeSha256(string path)
+    {
+        using var sha = System.Security.Cryptography.SHA256.Create();
+        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        return Convert.ToHexString(sha.ComputeHash(fs));
+    }
+
+    /// <summary>
+    /// 3.0.1.6 (требование 3.4): карантин файла из любого модуля (песочница, WinlockShield)
+    /// при недоступной панели — служба действует сама: карантин + HashIndex.Remember.
+    /// </summary>
+    public bool QuarantineFile(string path, string virusName)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+            {
+                return false;
+            }
+
+            _quarantine.MoveToQuarantine(path, virusName, DetectionType.Virus);
+            if (_hashIndex is not null)
+            {
+                _ = _hashIndex.RememberAsync(path, virusName);
+            }
+
+            _logger.Info(LogCategory.Realtime, $"Карантин (служба): {path} ({virusName})");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(LogCategory.Realtime, "Карантин (служба) не удался: " + ex.Message);
+            return false;
         }
     }
 
@@ -3291,17 +5393,28 @@ public sealed class AntivirusRunner : IDisposable
         }
     }
 
-    private void SetupAutoUpdateTimer()
+    /// <summary>
+    /// Таймер автообновления (требование A2: НЕ чаще 2 раз в день).
+    /// Первый тик — не сразу после старта службы, а через 1 час (не грузим систему).
+    /// Далее — с интервалом <see cref="JsonConfiguration.AutoUpdateIntervalHours"/>
+    /// (минимум 12 часов). Переустановка в finally RunScheduledUpdateAsync передаёт
+    /// <paramref name="resetToFullInterval"/>=true, чтобы следующий тик наступил ровно
+    /// через ПОЛНЫЙ интервал, а не через стартовый «1 час» — иначе быстрое обновление
+    /// («up-to-date») зацикливало бы проверки каждые 10 минут (в логах VM автообновление
+    /// стартовало каждые 10 минут после каждого срабатывания).
+    /// </summary>
+    private void SetupAutoUpdateTimer(bool resetToFullInterval = false)
     {
         _updateTimer?.Dispose();
-        // Первая проверка — НЕ сразу после старта службы, а через 10 минут (п.13):
-        // при запуске приложения freshclam не стартует и не грузит систему.
-        // Далее — с заданным интервалом.
+        var interval = TimeSpan.FromHours(Math.Max(12, _config.AutoUpdateIntervalHours));
+        var due = resetToFullInterval
+            ? interval
+            : TimeSpan.FromMinutes(60); // первый тик после старта — через 1 час
         _updateTimer = new System.Threading.Timer(
             _ => Task.Run(RunScheduledUpdateAsync),
             null,
-            TimeSpan.FromMinutes(10),
-            TimeSpan.FromHours(Math.Max(1, _config.AutoUpdateIntervalHours)));
+            due,
+            interval);
     }
 
     private async Task RunScheduledUpdateAsync()
@@ -3325,6 +5438,13 @@ public sealed class AntivirusRunner : IDisposable
                 return;
             }
 
+            // 3.0.1.6 (требование A2 п.3): freshclam НЕ гасит clamd/clamscan. Если базы
+            // заняты clamd (freshclam вернёт «Can't delete the old database»), освобождаем
+            // clamd ТОЛЬКО в этот момент через ReleaseClamdForUpdate (защита на clamscan),
+            // а после успешного обновления переподнимаем демон с новыми базами.
+            _clamdReleasedForUpdate = false;
+            manager.DatabaseReleaseCallback = ReleaseClamdForUpdate;
+
             // 3.0.1.5: статусы по компонентам (панель UpdateView читает update-status.json).
             var status = _updateStatusStore;
 
@@ -3334,6 +5454,11 @@ public sealed class AntivirusRunner : IDisposable
             _logger.Info(LogCategory.Update, result.Success
                 ? Tr.T("Svc2319")
                 : Tr.T("Svc2320"));
+            // 3.0.1.6 (требование A2 п.2): каждое обновление — видимая строка в realtime-логе
+            // с компонентом, временем и результатом.
+            _logger.Info(LogCategory.Realtime, result.Success
+                ? $"UPDATE: сигнатуры успешно (базы перезагружены в clamd), {DateTime.Now:HH:mm:ss}"
+                : $"UPDATE: сигнатуры ОШИБКА: {result.Error} ({DateTime.Now:HH:mm:ss})");
             WriteUpdateLog(result.Success);
             if (result.Success)
             {
@@ -3341,9 +5466,20 @@ public sealed class AntivirusRunner : IDisposable
                 WriteLastUpdateCheck();
                 // 3.0.0.17.2: базы обновились — пересобираем глобальный hash-индекс.
                 _ = EnsureHashSeedAsync();
-                // 3.0.1.4-fix (C2): clamd должен перезагрузить базы немедленно, а не
-                // ждать SelfCheck (600 с) — иначе реальное время «слепо» к новым сигнатурам.
-                ReloadClamdAfterUpdate();
+                // 3.0.1.6 (требование A2 п.3): если clamd был освобождён для записи баз —
+                // переподнимаем его с новыми базами; иначе — горячий RELOAD (3.0.1.4 C2:
+                // clamd не должен ждать SelfCheck 600 с и оставаться «слепым» к новым базам).
+                if (_clamdReleasedForUpdate)
+                {
+                    _clamdReleasedForUpdate = false;
+                    _logger.Info(LogCategory.Realtime,
+                        "UPDATE: clamd освобождался для записи баз — переподнимаю с новыми базами.");
+                    StartClamdUpgrade(autoLifted: true);
+                }
+                else
+                {
+                    ReloadClamdAfterUpdate();
+                }
             }
             else
             {
@@ -3360,9 +5496,12 @@ public sealed class AntivirusRunner : IDisposable
             }
 
             // 3.0.1.5: списки доменов майнеров (пулы).
+            // D7 (3.0.1.6): fire-and-forget — обновление списков не блокирует общий цикл
+            // автообновления (раньше ожидание до 40 с удлиняло этап и держало панель в
+            // состоянии «Обновление выполняется службой…»). Ошибки ловятся внутри метода.
             if (_config.AutoUpdateMinerLists)
             {
-                await UpdateMinerListsAsync();
+                _ = UpdateMinerListsAsync();
             }
         }
         catch (Exception ex)
@@ -3373,7 +5512,10 @@ public sealed class AntivirusRunner : IDisposable
         {
             Interlocked.Exchange(ref _autoUpdateInProgress, 0);
             // Переустанавливаем таймер с актуальным интервалом (если он был изменён в панели).
-            SetupAutoUpdateTimer();
+            // 3.0.1.6 (требование A2): следующий тик — через ПОЛНЫЙ интервал (не чаще 2 раз
+            // в день), а не через стартовые 10 минут/1 час: иначе быстрое обновление
+            // зацикливалось бы каждые 10 минут.
+            SetupAutoUpdateTimer(resetToFullInterval: true);
         }
     }
 
@@ -3484,6 +5626,39 @@ public sealed class AntivirusRunner : IDisposable
                 StartClamdUpgrade(autoLifted: true);
             }
             catch { /* не критично */ }
+        }
+    }
+
+    /// <summary>
+    /// 3.0.1.6 (требование A2): освобождает clamd для записи freshclam ТОЛЬКО когда базы
+    /// реально заблокированы (freshclam вернул «Can't delete the old database»).
+    /// Защита НЕ останавливается: конвейер переключается на clamscan-фолбэк
+    /// (<see cref="StopAutoClamd"/>), после обновления clamd переподнимается
+    /// (<see cref="StartClamdUpgrade"/>) с новыми базами. Колбэк для
+    /// <see cref="CatGuardian.Antivirus.Scanner.FreshClamUpdateManager.DatabaseReleaseCallback"/>.
+    /// </summary>
+    private bool ReleaseClamdForUpdate()
+    {
+        try
+        {
+            var host = _clamdHost;
+            if (host is null || !host.IsRunning)
+            {
+                // clamd и так недоступен — блокировки баз нет, обновление можно повторять.
+                return true;
+            }
+
+            _logger.Info(LogCategory.Realtime,
+                "UPDATE: clamd держит .cvd открытыми (freshclam не может заменить базу) — " +
+                "освобождаю clamd, защита продолжает работать на clamscan.");
+            StopAutoClamd();
+            _clamdReleasedForUpdate = true;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(LogCategory.Realtime, "UPDATE: не удалось освободить clamd: " + ex.Message);
+            return false;
         }
     }
 
@@ -3742,10 +5917,16 @@ public sealed class AntivirusRunner : IDisposable
         _entropyMonitor = null;
         _sweepTimer?.Dispose();
         _sweepTimer = null;
+        _dropperKillerTimer?.Dispose();
+        _dropperKillerTimer = null;
         _updateTimer?.Dispose();
         _updateTimer = null;
         _clamdIdleTimer?.Dispose();
         _clamdIdleTimer = null;
+        _scannerGuardTimer?.Dispose();
+        _scannerGuardTimer = null;
+        _winlockShield?.Dispose();
+        _winlockShield = null;
         _clamdRetryTimer?.Dispose();
         _clamdRetryTimer = null;
         _seedRetryTimer?.Dispose();

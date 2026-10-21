@@ -133,6 +133,8 @@ public sealed class AutoStartMonitor : IDisposable
     private readonly JsonConfiguration _config;
     private readonly FileLogger _logger;
     private readonly GuardianService _service;
+    // P12-B (3.0.1.6-p12): карантин для изоляции баннеров/dropper'ов (вместо .bak).
+    private readonly CatGuardian.Antivirus.Core.Quarantine.QuarantineService? _quarantine;
     private IScanner? _scanner;
     // 3.0.0.10: кэш репутации процессов + сетевые флаги брандмауэра (Pre-Scan Heuristics).
     private readonly ProcessRegistry _processRegistry;
@@ -190,13 +192,15 @@ public sealed class AutoStartMonitor : IDisposable
     };
 
     public AutoStartMonitor(JsonConfiguration config, FileLogger logger, IScanner? scanner,
-        ProcessRegistry? processRegistry = null)
+        ProcessRegistry? processRegistry = null, CatGuardian.Antivirus.Core.Quarantine.QuarantineService? quarantine = null)
     {
         _config = config;
         _logger = logger;
         _scanner = scanner;
         _processRegistry = processRegistry ?? new ProcessRegistry();
         _service = new GuardianService();
+        // P12-B (3.0.1.6-p12): карантин для изоляции баннеров/dropper'ов (вместо .bak).
+        _quarantine = quarantine;
         LoadNotified();
     }
 
@@ -667,7 +671,28 @@ public sealed class AutoStartMonitor : IDisposable
         _service.MigrateHkcuBaseline();
         // 3.0.0.59-fix: читаем только автозагрузочные корни (SQL по набору префиксов) —
         // раньше каждый цикл материализовывал ВСЮ таблицу (сотни МБ при раздутом эталоне).
-        var baseline = _service.RegistryBaselines.GetByRoots(AutoStartRegistryKeys);
+        // P6-C (3.0.1.6): HKCU-шаблоны разворачиваются в канонические HKEY_USERS\<SID> —
+        // иначе GetByRoots (чистый SQL, без разворачивания) не возвращает записи эталона
+        // пользователей и HKCU-записи молча пропускались строкой expectedKeys
+        // («изменений: 0», лог ВМ5 16.10).
+        var expandedRoots = CatGuardian.Integrity.Scanning.RegistryUserHives.ExpandAll(AutoStartRegistryKeys);
+        var baseline = _service.RegistryBaselines.GetByRoots(expandedRoots);
+
+        // W3-9 (3.0.1.6-fix): снапшоты Startup/задач снимаются как эталон при первом тике,
+        // даже если реестровый эталон ещё не покрыт. Иначе HasBaselineCoverage вечно false
+        // при включённой папке Startup (замкнутый круг: без снапшота модуль не работает,
+        // а снапшот снимается только при работающем модуле) — баннер закреплялся в
+        // автозагрузке без алерта (лог ВМ 15.10: «снимок реестра не покрывает включённые
+        // категории»). Снапшот фиксирует ТЕКУЩЕЕ состояние как эталон — «новыми» считаются
+        // файлы/задачи, появившиеся ПОСЛЕ снятия.
+        if (_config.AutoStartCheckStartupFolder && !StartupSnapshotExists())
+        {
+            SaveStartupSnapshot(CollectStartupFiles());
+        }
+        if (_config.AutoStartCheckTasks && !TaskSnapshotExists())
+        {
+            SaveTaskSnapshot(CollectTasks());
+        }
 
         // 3.0.0.7: проверяем ТОЛЬКО если эталон покрывает все включённые категории.
         // Иначе «Проверить сейчас» без снимка/со старым снимком порождает лавину
@@ -690,8 +715,13 @@ public sealed class AutoStartMonitor : IDisposable
         // B5 (3.0.0.18): снимок веток снимается ПАРАЛЛЕЛЬНО — ветки Services/IFEO содержат
         // тысячи подключачей, последовательный обход занимал 16-35 с на цикл и откладывал
         // обнаружение новых записей до следующего цикла.
-        var current = TakeSnapshotParallel(AutoStartRegistryKeys);
+        // P6-C: снимок снимается с тех же РАЗВЁРНУТЫХ корней — единый набор веток для
+        // эталона и снимка (иначе HKEY_USERS\<SID> в снимке vs HKEY_CURRENT_USER в
+        // GetByRoots даёт рассинхрон и молчаливый пропуск HKCU-записей).
+        var current = TakeSnapshotParallel(expandedRoots);
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // P6-C: диагностика — сколько записей снимка пропущено из-за отсутствия в эталоне.
+        int skippedNoBaseline = 0;
 
         foreach (var rec in current)
         {
@@ -702,8 +732,86 @@ public sealed class AutoStartMonitor : IDisposable
 
             // Сверяем только те ветки, которые реально сняты в эталоне инспектора:
             // иначе сотни системных служб без снимка дадут ложные «новые элементы».
-            if (!expectedKeys.Contains(rec.Key)) continue;
+            if (!expectedKeys.Contains(rec.Key)) { skippedNoBaseline++; continue; }
 
+            // P7-A (3.0.1.6-p7): собственная запись продукта — установщик/панель добавляют
+            // автозапуск TrayHost в HKCU Run ПОСЛЕ снятия эталона (ВМ6 16.10: ложный
+            // «новый элемент» на CatGuardian.TrayHost.exe). Свой модуль — не угроза:
+            // пропускаем без алерта и без дорогого анализа (ClamAV-таймауты затягивали
+            // цикл до 90+ с).
+            var ownExe = ExtractExePath(rec.ValueData);
+            if (IsOwnProductExe(ownExe))
+            {
+                var ownKey = "regown:" + Map(rec.Key, rec.ValueName);
+                if (!_notified.Contains(ownKey)) _notified.Add(ownKey);
+                _logger.Info(LogCategory.Realtime,
+                    $"Автозагрузка: собственная запись '{rec.ValueName}' ветки «{rec.Key}» → '{ownExe}' — пропущена (свой модуль Cat Guardian).");
+                continue;
+            }
+
+            // P8-B (3.0.1.6-p8): запись автозапуска ИЗВЕСТНОГО БАННЕРА (кириллический
+            // маскарад, напр. C:\WINDОWS\ехрlоrеr.exe) — удаляем АВТОМАТИЧЕСКИ, без окна.
+            // ВМ7 17.10: баннер пересоздавал себя в HKCU Run, каждое появление рождало
+            // новый алерт — пользователь не должен «тыкать» по баннеру бесконечно.
+            if (IsKnownBannerEntry(rec.ValueData))
+            {
+                var bannerRemoved = TryRemoveAutostartValue(rec.Key, rec.ValueName);
+                var bannerKey = "regbanner:" + Map(rec.Key, rec.ValueName);
+                if (!_notified.Contains(bannerKey)) _notified.Add(bannerKey);
+                _logger.Error(LogCategory.Realtime,
+                    $"Автозагрузка: запись баннера '{rec.ValueName}' в «{rec.Key}» удалена автоматически " +
+                    $"(маскарад-путь, удалено={bannerRemoved}). Окно не показывается — баннер уже нейтрализован.");
+
+                // P11-A (3.0.1.6-p11): событие в журнале — пользователь видит, что запись
+                // баннера нейтрализована автоматически (раньше — только лог, «в событиях
+                // нет информации», ВМ4 18.10).
+                try
+                {
+                    _service.Events.Add(new EventRecord
+                    {
+                        Source = EventSource.Winlock,
+                        Type = ChangeType.Malicious,
+                        Target = ownExe ?? rec.ValueName,
+                        Detail = $"Запись автозапуска баннера «{rec.ValueName}» удалена автоматически (маскарад-путь).",
+                        OccurredAt = DateTime.UtcNow,
+                        Status = EventStatus.Pending,
+                    });
+                }
+                catch { /* событие некритично */ }
+
+                // P12-A (3.0.1.6-p12): АЛЕРТ об авто-удалении записи баннера — 1 окно на
+                // путь (кулдаун 10 мин), кнопка «Доверять» (whitelist). Пользователь видит,
+                // что запись нейтрализована (раньше — только событие в журнале, ВМ3 18.10).
+                if (!string.IsNullOrWhiteSpace(ownExe))
+                {
+                    var now = DateTime.UtcNow;
+                    var wKey = "exe:" + ownExe;
+                    if (!_windowCooldown.TryGetValue(wKey, out var lastW)
+                        || (now - lastW) > TimeSpan.FromMinutes(10))
+                    {
+                        _windowCooldown[wKey] = now;
+                        RaiseWinlockAlert(new WinlockAlertDto
+                        {
+                            ActionKey = "winlock_autoremove:" + ownExe,
+                            FilePath = ownExe,
+                            IsolatedPath = "",
+                            Branch = rec.Key,
+                            ValueName = rec.ValueName,
+                            EntryKind = AutoStartEntryKind.RegistryRun,
+                            RiskZone = "",
+                            FileRenamed = false,
+                            EntryDeleted = true,
+                            ProcessKilled = false,
+                            SignatureText = "❌ Отсутствует (маскарад-путь)",
+                            ClamVerdict = "—",
+                            RiskScore = 0,
+                            Details = $"🛡️ Winlock Защита: запись автозапуска баннера «{rec.ValueName}» удалена автоматически (маскарад-путь). Файл: {ownExe}",
+                        });
+                    }
+                }
+
+                continue;
+            }
             var mapKey = Map(rec.Key, rec.ValueName);
             seen.Add(mapKey);
             var kind = ClassifyRegistryEntry(rec.Key);
@@ -766,6 +874,13 @@ public sealed class AutoStartMonitor : IDisposable
             }
         }
 
+        // P6-C (3.0.1.6): диагностика покрытия. По логу сразу видно состояние:
+        // эталон пуст / не покрывает включённые ветки / появился новый профиль после
+        // снятия эталона (skippedNoBaseline > 0). Раньше «изменений: 0» было немым.
+        _logger.Info(LogCategory.Realtime,
+            $"Автозагрузка (реестр): эталон={baseline.Count}, снимок={current.Count}, " +
+            $"сверено={seen.Count}, пропущено (нет в эталоне)={skippedNoBaseline}.");
+
         // M5: удалённые значения относительно эталона (запись автозагрузки исчезла).
         foreach (var pair in expected)
         {
@@ -785,6 +900,12 @@ public sealed class AutoStartMonitor : IDisposable
             // 3.0.0.13: удаление служебных значений-данных (счётчиков) — не признак атаки.
             // 3.0.0.41: StartupApproved — бинарные флаги, фильтр hints не применяем.
             if (IsVolatileValue(rec.Key, rec.ValueName)) continue;
+            // P10-A (3.0.1.6-p10): RunOnce — одноразовые записи (выполнились и удалились
+            // штатно, напр. OneDrive «Delete Cached Update Binary»/«Uninstall …») — удаление
+            // НЕ событие (ВМ 17.10: 4 «странных» алерта «Запись удалена из автозагрузки»).
+            if (rec.Key.Contains("RunOnce", StringComparison.OrdinalIgnoreCase)) continue;
+            // P7-A: удаление собственной записи продукта — не событие.
+            if (IsOwnProductExe(ExtractExePath(rec.ValueData))) continue;
             if (!IsFlagOnlyEntry(rec.Key) && !HasCommandHints(rec.ValueData)) continue;
 
             var actionKey = "regdel:" + pair.Key;
@@ -839,6 +960,9 @@ public sealed class AutoStartMonitor : IDisposable
             {
                 if (string.Equals(oldValue, task.Value, StringComparison.Ordinal)) continue;
 
+                // P7-A: собственная задача продукта — пропуск без алерта.
+                if (IsOwnProductExe(ExtractExePath(task.Value))) continue;
+
                 // M1: ключ с хэшем нового значения — повторное изменение задачи алертится снова.
                 var actionKey = "task:" + task.Key + ":" + StableHash(task.Value);
                 if (_notified.Contains(actionKey)) continue;
@@ -857,6 +981,9 @@ public sealed class AutoStartMonitor : IDisposable
             }
             else
             {
+                // P7-A: собственная задача продукта — пропуск без алерта.
+                if (IsOwnProductExe(ExtractExePath(task.Value))) continue;
+
                 var actionKey = "task:" + task.Key;
                 if (_notified.Contains(actionKey)) continue;
                 _notified.Add(actionKey);
@@ -1491,8 +1618,46 @@ public sealed class AutoStartMonitor : IDisposable
     {
         var file = a.FilePath;
 
-        // Шаг 1. «Заморозка на диске»: переименование лишает файл возможности запуститься.
-        var renamed = TryRenameToBak(file, out var isolatedPath, out var killed);
+        // Шаг 1. P12-B (3.0.1.6-p12): изоляция — КАРАНТИН (восстановимо), а не .bak.
+        // Пользователь: «переименование в .bak — вирус в памяти может вернуть расширение;
+        // в карантин надо перемещать, из карантина человек восстановит». Если карантин
+        // недоступен — fallback на .bak.
+        var isolated = false;
+        var isolatedPath = "";
+        var killed = false;
+        // P15: признак «изоляция выполнена КАРАНТИНОМ» (а не fallback .bak) — окно
+        // показывает «перемещён в карантин» вместо «переименован в .bak».
+        var quarantined = false;
+        // P19 (Q5): время создания dropper-файла фиксируем ДО карантина — после перемещения
+        // в карантин GetCreationTimeUtc вернёт эпоху, и корреляция создателя по времени
+        // не сработает (ВМ 21.10: «корреляция пуста» — файл уже был перемещён).
+        DateTime? dropperCreationUtc = null;
+        try { dropperCreationUtc = File.GetCreationTimeUtc(file); } catch { dropperCreationUtc = null; }
+        if (_quarantine is not null && !string.IsNullOrWhiteSpace(file) && File.Exists(file))
+        {
+            try
+            {
+                var entry = _quarantine.MoveToQuarantine(file, "Winlock.Shield", DetectionType.Virus);
+                isolated = entry is not null;
+                isolatedPath = entry?.QuarantinePath ?? "";
+                quarantined = isolated;
+            }
+            catch (Exception ex)
+            {
+                _logger.Warning(LogCategory.Realtime, "Winlock: карантин файла: " + ex.Message);
+            }
+        }
+        if (!isolated)
+        {
+            isolated = TryRenameToBak(file, out isolatedPath, out killed);
+        }
+
+        // P15: убить процесс dropper'а и его создателя (вирус в памяти пересоздаёт
+        // файлы, пока жив создатель — ВМ 19.10: C200/AFBD/9CDD.tmp.exe плодились каждую минуту).
+        if (isolated)
+        {
+            KillDropperProcessAndCreator(file, dropperCreationUtc);
+        }
 
         // Шаг 2. Откат автозапуска: HKCU напрямую, HKLM/задачи — через UAC (Privileged).
         var entryDeleted = DeleteEntry(new AutoStartActionDto
@@ -1504,12 +1669,14 @@ public sealed class AutoStartMonitor : IDisposable
             ValueName = a.ValueName,
         });
 
-        if (!renamed && !entryDeleted)
+        if (!isolated && !entryDeleted)
         {
             return null;
         }
 
-        return BuildWinlockAlert(a, isolatedPath, renamed, entryDeleted, killed);
+        var dto = BuildWinlockAlert(a, isolatedPath, isolated, entryDeleted, killed);
+        dto.IsQuarantined = quarantined;
+        return dto;
     }
 
     /// <summary>Собирает DTO алерта Winlock (общий для стандартного и Winlogon-вектора).</summary>
@@ -1550,7 +1717,7 @@ public sealed class AutoStartMonitor : IDisposable
         {
             parts.Add("изолированы: " + string.Join(", ", isolatedFiles));
         }
-        if (renamed) parts.Add("файл переименован в .bak — запуск невозможен");
+        if (renamed) parts.Add("файл перемещён в карантин — запуск невозможен");
         if (killed) parts.Add("запущенный процесс завершён");
         if (entryDeleted) parts.Add("запись автозагрузки удалена (" + a.Branch + "\\" + a.ValueName + ")");
         if (entryPoint && repaired) parts.Add($"значение Winlogon\\{a.ValueName} восстановлено");
@@ -1746,6 +1913,20 @@ public sealed class AutoStartMonitor : IDisposable
     /// </summary>
     private void RaiseWinlockAlert(WinlockAlertDto dto)
     {
+        var isAutoremove = dto.ActionKey.StartsWith("winlock_autoremove:", StringComparison.Ordinal);
+
+        // P14: ЕДИНАЯ дедупликация по пути файла — один инцидент = одно окно.
+        // WinlockShield-алерт (AntivirusRunner) помечает файл через WinlockAlertDedup.MarkShown;
+        // здесь повторные алерты того же файла (winlock:reg) подавляются.
+        // P17: для P12-A (winlock_autoremove) путь НЕ помечаем сразу — его окно отложено
+        // (ниже), чтобы shield-алерт успел стать главным уведомлением.
+        if (!isAutoremove && WinlockAlertDedup.ShouldSuppress(dto.FilePath))
+        {
+            _logger.Info(LogCategory.Realtime,
+                $"Winlock: алерт для '{dto.FilePath}' подавлен единой дедупликацией (окно уже показано).");
+            return;
+        }
+
         try
         {
             // 3.0.0.38: отдельный источник Winlock — в журнале «События» превентивная
@@ -1763,6 +1944,32 @@ public sealed class AutoStartMonitor : IDisposable
         catch (Exception ex)
         {
             _logger.Error(LogCategory.Realtime, "Не удалось записать событие Winlock: " + ex.Message);
+        }
+
+        if (isAutoremove)
+        {
+            // P17: окно P12-A (авто-удаление записи баннера) ОТКЛАДЫВАЕМ на 45 с — shield-алерт
+            // (баннер убит + карантин) успевает отметить путь и стать ЕДИНСТВЕННОЙ видимой
+            // сводкой (как требует пользователь: shield первым). Если shield не стрелял —
+            // окно показываем через 45 с.
+            _logger.Warning(LogCategory.Realtime, dto.Details);
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(45));
+                    if (WinlockAlertDedup.ShouldSuppress(dto.FilePath))
+                    {
+                        _logger.Info(LogCategory.Realtime,
+                            $"Winlock: P12-A для '{dto.FilePath}' подавлен (shield-алерт уже показан).");
+                        return;
+                    }
+                    var json = JsonSerializer.Serialize(dto, IpcProtocol.JsonOptions);
+                    PanelPipeClient.TrySend(IpcProtocol.MessageKind.WinlockAlert, json, TimeSpan.FromSeconds(3));
+                }
+                catch { /* отложенная доставка некритична */ }
+            });
+            return;
         }
 
         try
@@ -1819,6 +2026,546 @@ public sealed class AutoStartMonitor : IDisposable
             // Ошибка обхода процессов — вернём текущий результат.
         }
         return killedAny;
+    }
+
+    /// <summary>
+    /// P15: находит запущенный процесс dropper'а по пути, убивает его и проходит цепочку
+    /// создателей (до 3 уровней вверх), если они не легитимны. Отвечает на вопрос
+    /// «КТО создал и запустил dropper?» — вирус в памяти пересоздаёт файлы, пока жив
+    /// процесс-создатель (ВМ 19.10: C200/AFBD/9CDD.tmp.exe карантинились, но создатель
+    /// оставался жив и плодил новые).
+    /// </summary>
+    private void KillDropperProcessAndCreator(string filePath, DateTime? dropperCreationUtc = null)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(filePath)) return;
+            var target = Path.GetFullPath(filePath);
+            int? dropperPid = null;
+            foreach (var p in System.Diagnostics.Process.GetProcesses())
+            {
+                try
+                {
+                    if (p.Id == Environment.ProcessId) continue;
+                    var fileName = p.MainModule?.FileName;
+                    if (string.IsNullOrEmpty(fileName)) continue;
+                    if (Path.GetFullPath(fileName).Equals(target, StringComparison.OrdinalIgnoreCase))
+                    {
+                        dropperPid = p.Id;
+                        if (ProcessControl.KillForced(p.Id, p.ProcessName, p.StartTime.ToUniversalTime()))
+                        {
+                            _logger.Error(LogCategory.Realtime,
+                                $"Winlock: процесс dropper'а убит: pid={p.Id} path='{filePath}'");
+                        }
+                    }
+                }
+                catch { /* процесс завершился/нет прав */ }
+                finally { try { p.Dispose(); } catch { } }
+            }
+
+            // P16: если dropper-процесс уже завершился (короткоживущий: создал файл →
+            // зарегистрировал автозагрузку → вышел) — находим его РОДИТЕЛЯ (создателя)
+            // в кэше недавних запусков (RecentProcessStarts, ETW ProcessStart + поллинг).
+            // Цепочка создателей стартует с этого родителя.
+            int currentPid;
+            if (dropperPid is not null)
+            {
+                currentPid = dropperPid.Value;
+            }
+            else
+            {
+                var recent = CatGuardian.Antivirus.Core.ProcessPairs.RecentProcessStarts.FindByPath(filePath);
+                if (recent is not null && recent.ParentPid > 0)
+                {
+                    currentPid = recent.ParentPid;
+                    _logger.Info(LogCategory.Realtime,
+                        $"Winlock: dropper '{filePath}' создан процессом pid={recent.Pid} (parentPid={recent.ParentPid}) — " +
+                        "убиваю создателя из кэша недавних запусков.");
+
+                    // Создатель (recent.ParentPid) — убиваем ЕГО напрямую: dropper мёртв,
+                    // а создатель = персистентный процесс, который плодит dropper'ы.
+                    var creatorPath = ResolveProcessPath(currentPid);
+                    if (string.IsNullOrWhiteSpace(creatorPath))
+                    {
+                        creatorPath = CatGuardian.Antivirus.Core.ProcessPairs.ProcessPathCache.Get(currentPid);
+                    }
+                    if (string.IsNullOrWhiteSpace(creatorPath)
+                        || IsOwnProductExe(creatorPath)
+                        || IsCriticalSystemPath(creatorPath)
+                        || IsValidSignatureFast(creatorPath))
+                    {
+                        _logger.Warning(LogCategory.Realtime,
+                            $"Winlock: создатель dropper'а pid={currentPid} легитимен или путь не определён — не трогаю.");
+                        return;
+                    }
+                    var killedCreator = KillProcessTree(currentPid, creatorPath);
+                    _logger.Error(LogCategory.Realtime,
+                        $"Winlock: создатель dropper'а убит: pid={currentPid} path='{creatorPath}' " +
+                        $"(создал '{filePath}') killed={killedCreator}");
+                }
+                else
+                {
+                    // P17: dropper-процесс мёртв И кэш не помнит его старт — пробуем
+                    // корреляцию по ВРЕМЕНИ: создатель плодит dropper каждые ~60 с, поэтому
+                    // в момент детекта он, скорее всего, работает. Ищем запущенные процессы,
+                    // стартовавшие ±10 с от CreationTime dropper-файла, неподписанные и не в
+                    // легитимных путях — убиваем их + цепочку.
+                    _logger.Info(LogCategory.Realtime,
+                        $"Winlock: создатель dropper'а '{filePath}' не найден в кэше — корреляция по времени создания файла.");
+                    var creatorFound = KillCreatorByCorrelation(filePath, dropperCreationUtc);
+                    if (!creatorFound)
+                    {
+                        _logger.Info(LogCategory.Realtime,
+                            $"Winlock: создатель dropper'а '{filePath}' не найден (кэш пуст + корреляция пуста) — " +
+                            "пробую периодический killer риск-зон.");
+                    }
+                    return;
+                }
+            }
+
+            // Цепочка ВЫШЕ создателя (до 3 уровней).
+            var currentPath = filePath;
+            for (int level = 0; level < 3; level++)
+            {
+                var pp = GetParentProcessId(currentPid);
+                if (pp <= 0 || pp == currentPid) break;
+                var ppPath = ResolveProcessPath(pp);
+                if (string.IsNullOrWhiteSpace(ppPath)) ppPath = CatGuardian.Antivirus.Core.ProcessPairs.ProcessPathCache.Get(pp);
+                if (string.IsNullOrWhiteSpace(ppPath)) break;
+                if (IsOwnProductExe(ppPath)) break;
+                if (IsCriticalSystemPath(ppPath)) break;
+                if (IsValidSignatureFast(ppPath)) break; // легитимный подписанный — не трогаем
+                var killed = KillProcessTree(pp, ppPath);
+                _logger.Error(LogCategory.Realtime,
+                    $"Winlock: создатель dropper'а убит: level={level + 1} pid={pp} path='{ppPath}' " +
+                    $"(создал '{currentPath}') killed={killed}");
+                currentPid = pp;
+                currentPath = ppPath;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(LogCategory.Realtime, "Winlock: поиск создателя dropper'а: " + ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// P17: корреляция СОЗДАТЕЛЯ по ВРЕМЕНИ. Персистентный создатель плодит dropper каждые
+    /// ~60 с, поэтому в момент детекта он почти наверняка работает. Ищем запущенные процессы,
+    /// стартовавшие в пределах ±10 с от CreationTime dropper-файла, неподписанные и не в
+    /// легитимных путях — убиваем их + цепочку выше. Возвращает true, если кто-то убит.
+    /// </summary>
+    private bool KillCreatorByCorrelation(string dropperPath, DateTime? creationUtcOverride = null)
+    {
+        // P19 (Q5): время создания dropper-файла передаётся из TryIsolateWinlock (зафиксировано
+        // ДО карантина). После перемещения файла в карантин GetCreationTimeUtc вернёт эпоху,
+        // и корреляция по времени всегда была бы пуста (ВМ 21.10: «корреляция пуста»).
+        DateTime creationUtc;
+        if (creationUtcOverride is not null)
+        {
+            creationUtc = creationUtcOverride.Value;
+        }
+        else
+        {
+            try { creationUtc = File.GetCreationTimeUtc(dropperPath); }
+            catch { return false; }
+        }
+
+        if (DateTime.UtcNow - creationUtc > TimeSpan.FromHours(2))
+        {
+            return false; // файл старый — корреляция бессмысленна
+        }
+
+        // P20 (P2): окно корреляции расширено — дроппер создаёт tmp-файлы через 20–60 с
+        // ПОСЛЕ старта (сначала баннер, потом tmp-копии). Окно ±10 с не покрывало старт
+        // создателя (ВМ4: 52725.exe стартовал 13:03:09, B0E0.tmp.exe создан 13:03:30 →
+        // «корреляция пуста»). Создатель стартует ДО создания файла: окно -60 с / +10 с.
+        var beforeWindow = TimeSpan.FromSeconds(60);
+        var afterWindow = TimeSpan.FromSeconds(10);
+        var killedAny = false;
+        // P21 (P2): создатель НАЙДЕН (жив или мёртв) — даже если не убит/не изолирован,
+        // «не найден» писать нельзя (ВМ5 14:30:11: «найден по кэшу, но завершился» +
+        // следом «не найден (кэш пуст + корреляция пуста)» — противоречие).
+        var foundAny = false;
+
+        // P19 (Q5): создатель (дроппер с цифровым именем на Desktop) мог ЗАВЕРШИТЬСЯ
+        // к моменту алерта автозагрузки (задержка до 5 мин) — по живым процессам его
+        // не найти. Ищем по КЭШУ недавних запусков (TTL 30 мин): запись создателя
+        // остаётся в кэше, даже если процесс мёртв (ВМ 21.10: «создатель не найден
+        // (кэш пуст + корреляция пуста)» — дроппер 52725.exe был уже мёртв).
+        var cacheCandidates = CatGuardian.Antivirus.Core.ProcessPairs.RecentProcessStarts
+            .FindByTimeRange(creationUtc - beforeWindow, creationUtc + afterWindow);
+        foreach (var cand in cacheCandidates)
+        {
+            try
+            {
+                if (cand.Pid <= 0 || string.IsNullOrWhiteSpace(cand.Path)) continue;
+                var full = Path.GetFullPath(cand.Path);
+                if (IsOwnProductExe(full)) continue;
+                if (IsCriticalSystemPath(full)) continue;
+                if (IsTrustedInstallZone(full)) continue;
+                if (IsValidSignatureFast(full)) continue;
+
+                var alive = false;
+                try
+                {
+                    using var proc = System.Diagnostics.Process.GetProcessById(cand.Pid);
+                    alive = proc.Id > 0;
+                }
+                catch { alive = false; }
+
+                foundAny = true; // создатель найден (жив или мёртв)
+                if (alive)
+                {
+                    var killed = KillProcessTree(cand.Pid, full);
+                    if (killed)
+                    {
+                        killedAny = true;
+                        _logger.Error(LogCategory.Realtime,
+                            $"Winlock: создатель dropper'а '{dropperPath}' найден по кэшу запусков: pid={cand.Pid} " +
+                            $"path='{full}' (started {cand.AtUtc:HH:mm:ss}, файл создан {creationUtc:HH:mm:ss}) killed={killed}");
+                        KillCreatorChain(cand.Pid, full);
+                    }
+                    // P20 (P3): карантин файла создателя и для ЖИВОГО создателя (после kill) —
+                    // иначе 52725.exe остаётся на диске и перезапускается (ВМ4: цикл tmp-файлов).
+                    TryQuarantineCreatorFile(full, dropperPath);
+                }
+                else
+                {
+                    // Создатель мёртв — трассируем цепочку предков ПО КЭШУ (parentPid → запись)
+                    // и карантиним файл создателя (дроппер 52725.exe на Desktop), если существует.
+                    _logger.Info(LogCategory.Realtime,
+                        $"Winlock: создатель dropper'а '{dropperPath}' найден по кэшу, но завершился: pid={cand.Pid} " +
+                        $"path='{full}' (started {cand.AtUtc:HH:mm:ss}) — трассирую предков по кэшу.");
+                    killedAny |= KillCreatorAncestorsFromCache(cand.Pid, full, dropperPath);
+                    TryQuarantineCreatorFile(full, dropperPath);
+                }
+            }
+            catch { /* запись некорректна — пропускаем */ }
+        }
+
+        foreach (var p in System.Diagnostics.Process.GetProcesses())
+        {
+            try
+            {
+                if (p.Id == Environment.ProcessId) continue;
+                var start = p.StartTime.ToUniversalTime();
+                if (start < creationUtc - beforeWindow || start > creationUtc + afterWindow) continue;
+                var path = p.MainModule?.FileName;
+                if (string.IsNullOrWhiteSpace(path)) continue;
+                var full = Path.GetFullPath(path);
+                if (IsOwnProductExe(full)) continue;
+                if (IsCriticalSystemPath(full)) continue;
+                foundAny = true; // кандидат в окне корреляции найден
+                // P18 (КРИТИЧЕСКОЕ): зона установки ПО (Program Files / Program Files (x86) /
+                // Windows) — НЕ создатель dropper'а. Легитимный 7zFM.exe из Program Files\7-Zip
+                // был ошибочно убит корреляцией в ВМ 21.10 (неподписанный, стартовал в окне
+                // ±10 с от создания файла). Подписанные и так отсекаются IsValidSignatureFast —
+                // этот фильтр страхует неподписанные установленные утилиты.
+                if (IsTrustedInstallZone(full)) continue;
+                if (IsValidSignatureFast(full)) continue; // подписанный — не создатель
+                var killed = KillProcessTree(p.Id, full);
+                if (killed)
+                {
+                    killedAny = true;
+                    _logger.Error(LogCategory.Realtime,
+                        $"Winlock: создатель dropper'а '{dropperPath}' найден корреляцией по времени: pid={p.Id} " +
+                        $"path='{full}' (started {start:HH:mm:ss}, файл создан {creationUtc:HH:mm:ss}) killed={killed}");
+                    KillCreatorChain(p.Id, full);
+                }
+            }
+            catch { /* процесс завершился/нет прав */ }
+            finally { try { p.Dispose(); } catch { } }
+        }
+        // P21 (P2): true, если создатель НАЙДЕН (даже если мёртв и не убит) — «не найден»
+        // в KillDropperProcessAndCreator писать нельзя (ВМ5: «найден по кэшу» + «не найден»).
+        return killedAny || foundAny;
+    }
+
+    /// <summary>
+    /// P19 (Q5): трассирует цепочку предков создателя ПО КЭШУ (parentPid → запись → ... до
+    /// 3 уровней) и убивает ЖИВОГО персистентного предка (дроппер мёртв, но его родитель —
+    /// планировщик/запускатель — может работать). Возвращает true, если кто-то убит.
+    /// </summary>
+    private bool KillCreatorAncestorsFromCache(int pid, string path, string dropperPath)
+    {
+        var currentPid = pid;
+        var currentPath = path;
+        for (int level = 0; level < 3; level++)
+        {
+            var entry = CatGuardian.Antivirus.Core.ProcessPairs.RecentProcessStarts.FindByPid(currentPid);
+            if (entry is null || entry.ParentPid <= 0 || entry.ParentPid == currentPid) break;
+            var pp = entry.ParentPid;
+            var ppEntry = CatGuardian.Antivirus.Core.ProcessPairs.RecentProcessStarts.FindByPid(pp);
+            if (ppEntry is null || string.IsNullOrWhiteSpace(ppEntry.Path)) break;
+            var ppPath = Path.GetFullPath(ppEntry.Path);
+            if (IsOwnProductExe(ppPath)) break;
+            if (IsCriticalSystemPath(ppPath)) break;
+            if (IsTrustedInstallZone(ppPath)) break;
+            if (IsValidSignatureFast(ppPath)) break;
+
+            var alive = false;
+            try
+            {
+                using var proc = System.Diagnostics.Process.GetProcessById(pp);
+                alive = proc.Id > 0;
+            }
+            catch { alive = false; }
+
+            if (alive)
+            {
+                var killed = KillProcessTree(pp, ppPath);
+                if (killed)
+                {
+                    _logger.Error(LogCategory.Realtime,
+                        $"Winlock: предок создателя dropper'а '{dropperPath}' убит: level={level + 1} pid={pp} " +
+                        $"path='{ppPath}' (создал '{currentPath}') killed={killed}");
+                    return true;
+                }
+            }
+            currentPid = pp;
+            currentPath = ppPath;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// P19 (Q5) + P21 (P1): карантин файла создателя (дроппер с цифровым именем на Desktop).
+    /// Дроппер не детектится clamd, но раз он создал баннер/tmp-копии — его файл обязан быть
+    /// изолирован, иначе цикл продолжится (ВМ 21.10: 52725.exe оставался на Desktop и плодил
+    /// tmp-файлы). P21: изоляция через КАРАНТИН (MoveToQuarantine, как TryIsolateWinlock) —
+    /// TryRenameToBak требует WinlockRenameIsolation=true, который после P12-B выключен
+    /// (ВМ5 14:30:11: создатель найден, но файл НЕ изолирован → цикл продолжился).
+    /// </summary>
+    private void TryQuarantineCreatorFile(string creatorPath, string dropperPath)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(creatorPath) || !File.Exists(creatorPath)) return;
+            if (IsOwnProductExe(creatorPath) || IsCriticalSystemPath(creatorPath)
+                || IsTrustedInstallZone(creatorPath) || IsValidSignatureFast(creatorPath)) return;
+
+            // P21 (P1): карантин — основной путь (восстановимо, как TryIsolateWinlock).
+            if (_quarantine is not null)
+            {
+                try
+                {
+                    var entry = _quarantine.MoveToQuarantine(creatorPath, "Winlock.Shield", DetectionType.Virus);
+                    if (entry is not null)
+                    {
+                        _logger.Error(LogCategory.Realtime,
+                            $"Winlock: файл создателя dropper'а в карантине: '{creatorPath}' → " +
+                            $"'{entry.QuarantinePath}' (создал '{dropperPath}')");
+                        return;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // P24: файл занят (процесс дроппера ещё жив, «Access denied» — ВМ 17:24:19) —
+                    // завершаем процесс по пути и повторяем карантин, как в TryRenameToBak.
+                    _logger.Warning(LogCategory.Realtime,
+                        "Winlock: карантин файла создателя: " + ex.Message +
+                        " — завершаю процесс и повторяю.");
+                    if (_config.WinlockKillProcess)
+                    {
+                        KillProcessByPath(creatorPath);
+                        try { System.Threading.Thread.Sleep(200); } catch { /* пауза после kill */ }
+                    }
+                    try
+                    {
+                        if (File.Exists(creatorPath))
+                        {
+                            var entry2 = _quarantine.MoveToQuarantine(creatorPath, "Winlock.Shield", DetectionType.Virus);
+                            if (entry2 is not null)
+                            {
+                                _logger.Error(LogCategory.Realtime,
+                                    $"Winlock: файл создателя dropper'а в карантине (после kill): '{creatorPath}' → " +
+                                    $"'{entry2.QuarantinePath}' (создал '{dropperPath}')");
+                                return;
+                            }
+                        }
+                    }
+                    catch (Exception ex2)
+                    {
+                        _logger.Warning(LogCategory.Realtime, "Winlock: повторный карантин файла создателя: " + ex2.Message);
+                    }
+                }
+            }
+
+            // Fallback: .bak (если карантин недоступен/не сработал).
+            string isolatedPath;
+            bool killed;
+            if (TryRenameToBak(creatorPath, out isolatedPath, out killed))
+            {
+                _logger.Error(LogCategory.Realtime,
+                    $"Winlock: файл создателя dropper'а изолирован (.bak): '{creatorPath}' → '{isolatedPath}' " +
+                    $"(создал '{dropperPath}') killed={killed}");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(LogCategory.Realtime, "Winlock: изоляция файла создателя: " + ex.Message);
+        }
+    }
+
+    /// <summary>Цепочка создателей ВЫШЕ найденного по корреляции создателя (до 3 уровней).</summary>
+    private void KillCreatorChain(int pid, string path)
+    {
+        var currentPid = pid;
+        var currentPath = path;
+        for (int level = 0; level < 3; level++)
+        {
+            var pp = GetParentProcessId(currentPid);
+            if (pp <= 0 || pp == currentPid) break;
+            var ppPath = ResolveProcessPath(pp);
+            if (string.IsNullOrWhiteSpace(ppPath)) ppPath = CatGuardian.Antivirus.Core.ProcessPairs.ProcessPathCache.Get(pp);
+            if (string.IsNullOrWhiteSpace(ppPath)) break;
+            if (IsOwnProductExe(ppPath)) break;
+            if (IsCriticalSystemPath(ppPath)) break;
+            if (IsValidSignatureFast(ppPath)) break;
+            var killed = KillProcessTree(pp, ppPath);
+            _logger.Error(LogCategory.Realtime,
+                $"Winlock: создатель (выше корреляции) dropper'а убит: level={level + 1} pid={pp} path='{ppPath}' " +
+                $"(создал '{currentPath}') killed={killed}");
+            currentPid = pp;
+            currentPath = ppPath;
+        }
+    }
+
+    /// <summary>P15: PID родителя процесса через NtQueryInformationProcess (без WMI).</summary>
+    private static int GetParentProcessId(int processId)
+    {
+        try
+        {
+            using var p = System.Diagnostics.Process.GetProcessById(processId);
+            var pbi = new ProcessBasicInformation();
+            var status = NtQueryInformationProcess(
+                p.Handle, 0, ref pbi, System.Runtime.InteropServices.Marshal.SizeOf<ProcessBasicInformation>(), out _);
+            return status == 0 ? (int)pbi.InheritedFromUniqueProcessId : 0;
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct ProcessBasicInformation
+    {
+        public IntPtr Reserved1;
+        public IntPtr PebBaseAddress;
+        public IntPtr Reserved2_0;
+        public IntPtr Reserved2_1;
+        public IntPtr UniqueProcessId;
+        public IntPtr InheritedFromUniqueProcessId;
+    }
+
+    [System.Runtime.InteropServices.DllImport("ntdll.dll")]
+    private static extern int NtQueryInformationProcess(
+        IntPtr processHandle, int processInformationClass,
+        ref ProcessBasicInformation processInformation, int processInformationLength, out int returnLength);
+
+    /// <summary>P15: резолв полного пути процесса (MainModule, затем QueryFullProcessImageName).</summary>
+    private static string? ResolveProcessPath(int pid)
+    {
+        try
+        {
+            using var p = System.Diagnostics.Process.GetProcessById(pid);
+            try
+            {
+                var m = p.MainModule?.FileName;
+                if (!string.IsNullOrWhiteSpace(m)) return m;
+            }
+            catch { /* elevated/завершился */ }
+            try
+            {
+                var sb = new System.Text.StringBuilder(1024);
+                int capacity = sb.Capacity;
+                if (QueryFullProcessImageName(p.Handle, 0, sb, ref capacity)) return sb.ToString();
+            }
+            catch { /* нет прав */ }
+        }
+        catch { /* процесс завершился */ }
+        return null;
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool QueryFullProcessImageName(
+        IntPtr hProcess, int dwFlags, System.Text.StringBuilder lpExeName, ref int lpdwSize);
+
+    /// <summary>P15: путь в системных каталогах (System32/SysWOW64/Windows) — критический.</summary>
+    private static bool IsCriticalSystemPath(string path)
+    {
+        try
+        {
+            var full = Path.GetFullPath(path).TrimEnd('\\');
+            var sys = Path.GetFullPath(Environment.SystemDirectory).TrimEnd('\\');
+            var win = Path.GetFullPath(Environment.GetFolderPath(Environment.SpecialFolder.Windows)).TrimEnd('\\');
+            return full.Equals(sys, StringComparison.OrdinalIgnoreCase)
+                || full.StartsWith(sys + "\\", StringComparison.OrdinalIgnoreCase)
+                || full.StartsWith(win + "\\System32", StringComparison.OrdinalIgnoreCase)
+                || full.StartsWith(win + "\\SysWOW64", StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// P18 (КРИТИЧЕСКОЕ): путь в «доверенной зоне установки ПО» — Program Files,
+    /// Program Files (x86) или Windows. Процессы оттуда НЕ могут быть создателем
+    /// dropper'а (легитимное установленное ПО; 7zFM.exe из Program Files\7-Zip
+    /// был ошибочно убит корреляцией в ВМ 21.10). Подписанные процессы и так
+    /// отсекаются IsValidSignatureFast — этот фильтр страхует неподписанные
+    /// установленные утилиты.
+    /// </summary>
+    private static bool IsTrustedInstallZone(string path)
+    {
+        try
+        {
+            var full = Path.GetFullPath(path).TrimEnd('\\');
+            string[] zones = [
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+                Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+            ];
+            foreach (var zone in zones)
+            {
+                if (string.IsNullOrEmpty(zone)) continue;
+                var z = Path.GetFullPath(zone).TrimEnd('\\');
+                if (full.Equals(z, StringComparison.OrdinalIgnoreCase)
+                    || full.StartsWith(z + "\\", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>P15: завершает дерево процесса (сам процесс + потомки) с верификацией пути.</summary>
+    private static bool KillProcessTree(int pid, string expectedPath)
+    {
+        try
+        {
+            using var p = System.Diagnostics.Process.GetProcessById(pid);
+            var actual = p.MainModule?.FileName;
+            if (!string.IsNullOrWhiteSpace(actual)
+                && !Path.GetFullPath(actual).Equals(Path.GetFullPath(expectedPath), StringComparison.OrdinalIgnoreCase))
+            {
+                return false; // PID переиспользован — не убиваем чужой процесс
+            }
+            return ProcessControl.KillForced(p.Id, p.ProcessName, p.StartTime.ToUniversalTime());
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     /// <summary>
@@ -1949,6 +2696,109 @@ public sealed class AutoStartMonitor : IDisposable
     }
 
     /// <summary>
+    /// P7-A (3.0.1.6-p7): true — команда автозапуска указывает на собственный исполняемый
+    /// файл Cat Guardian (каталог установки + имена CatGuardian*). Свои записи не являются
+    /// угрозой: установщик/панель добавляют автозапуск TrayHost в HKCU Run ПОСЛЕ снятия
+    /// эталона (ВМ6 16.10: ложный «новый элемент» на CatGuardian.TrayHost.exe). Проверка по
+    /// ПОЛНОМУ пути (не по имени) — подделка имени в чужой папке не считается «своей».
+    /// </summary>
+    private static bool IsOwnProductExe(string? exePath)
+    {
+        if (string.IsNullOrWhiteSpace(exePath)) return false;
+
+        // P8-A (3.0.1.6-p8): ресурсные строки вида "@C:\path,-id" (LocalizedName/DisplayName
+        // системных компонентов Active Setup / GPExtensions) — НЕ пути: GetFullPath трактовал
+        // их как относительные и «загонял» в каталог службы → ложные «свой модуль»
+        // (лог ВМ7 17.10: сотни «своих» системных записей в Active Setup/Winlogon).
+        var candidate = exePath.Trim().Trim('"');
+        if (candidate.StartsWith("@", StringComparison.Ordinal)) return false;
+        // Только абсолютные пути: диск «C:» или UNC. «foo.exe»/«@...» — не пути к exe.
+        if (!(candidate.Length >= 2 && candidate[1] == ':')
+            && !candidate.StartsWith("\\\\", StringComparison.Ordinal)) return false;
+
+        string full;
+        try { full = Path.GetFullPath(candidate); }
+        catch { return false; }
+
+        var installDir = Path.GetFullPath(AppContext.BaseDirectory).TrimEnd('\\', '/');
+        if (full.StartsWith(installDir + "\\", StringComparison.OrdinalIgnoreCase))
+        {
+            return true; // любой модуль внутри каталога установки службы/панели
+        }
+
+        // Вне каталога установки — только явное имя CatGuardian* в Program Files\Cat Guardian.
+        var name = Path.GetFileName(full);
+        if (!name.StartsWith("CatGuardian", StringComparison.OrdinalIgnoreCase)) return false;
+        try
+        {
+            var pf = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+            return full.StartsWith(pf + "\\Cat Guardian\\", StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// P8-B (3.0.1.6-p8): true — команда автозапуска указывает на известный баннер
+    /// (кириллический маскарад системного файла, напр. C:\WINDОWS\ехрlоrеr.exe).
+    /// Такие записи нейтрализуются автоматически, без диалогов.
+    /// </summary>
+    private bool IsKnownBannerEntry(string? valueData)
+    {
+        var path = ExtractExePath(valueData);
+        return !string.IsNullOrWhiteSpace(path)
+               && CatGuardian.Antivirus.Core.MasqueradeNames.IsMasqueradePath(path);
+    }
+
+    /// <summary>
+    /// P8-B: удаляет значение реестра автозапуска (HKCU-профиль / HKLM). Вызывается ТОЛЬКО
+    /// для известных баннеров после <see cref="IsKnownBannerEntry"/>. Возвращает false,
+    /// если ветка недоступна (например, незагруженный профиль).
+    /// </summary>
+    private bool TryRemoveAutostartValue(string keyPath, string valueName)
+    {
+        try
+        {
+            // P9-A (3.0.1.6-p9): открываем ключ С ПРАВОМ ЗАПИСИ. RegistryUserHives.OpenKey
+            // открывает read-only, и DeleteValue падал «Cannot write to the registry key»
+            // (лог ВМ 17.10: запись баннера оставалась в автозагрузке и запускалась при
+            // следующем входе).
+            var hklm = CatGuardian.Integrity.Scanning.RegistryUserHives.StripHive(keyPath, "HKEY_LOCAL_MACHINE");
+            if (hklm is not null)
+            {
+                using var key = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Default)
+                    .OpenSubKey(hklm, writable: true);
+                if (key is null) return false;
+                key.DeleteValue(valueName, throwOnMissingValue: false);
+                return true;
+            }
+
+            var hku = CatGuardian.Integrity.Scanning.RegistryUserHives.StripHive(keyPath, "HKEY_USERS");
+            if (hku is not null)
+            {
+                var idx = hku.IndexOf('\\');
+                var sid = idx < 0 ? hku : hku[..idx];
+                var sub = idx < 0 ? "" : hku[(idx + 1)..];
+                using var key = RegistryKey.OpenBaseKey(RegistryHive.Users, RegistryView.Default)
+                    .OpenSubKey(string.IsNullOrEmpty(sub) ? sid : sid + "\\" + sub, writable: true);
+                if (key is null) return false;
+                key.DeleteValue(valueName, throwOnMissingValue: false);
+                return true;
+            }
+
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(LogCategory.Realtime,
+                $"Автозагрузка: не удалось удалить запись баннера '{valueName}': " + ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>
     /// 3.0.0.41: true — ветка StartupApproved (бинарные флаги Explorer). Для неё
     /// фильтр командных подсказок <see cref="HasCommandHints"/> не работает и не нужен:
     /// алертим любое появление/изменение/удаление записи.
@@ -2005,7 +2855,6 @@ public sealed class AutoStartMonitor : IDisposable
         const int ssodlIdx = 14;
         const int activeSetupIdx = 15;
         const int policyRunStart = 16;    // HKLM/HKCU Policies\Explorer\Run (16..17)
-        const int startupApprovedStart = 18; // HKCU/HKLM × {Run,StartupFolder} (18..21)
 
         var list = new List<string>();
         if (_config.AutoStartCheckRun)
@@ -2037,13 +2886,9 @@ public sealed class AutoStartMonitor : IDisposable
             list.Add(AutoStartRegistryKeys[policyRunStart]);
             list.Add(AutoStartRegistryKeys[policyRunStart + 1]);
         }
-        if (_config.AutoStartCheckStartupApproved)
-        {
-            list.Add(AutoStartRegistryKeys[startupApprovedStart]);
-            list.Add(AutoStartRegistryKeys[startupApprovedStart + 1]);
-            list.Add(AutoStartRegistryKeys[startupApprovedStart + 2]);
-            list.Add(AutoStartRegistryKeys[startupApprovedStart + 3]);
-        }
+        // P3-3: StartupApproved (18..21) исключены из детекции — бинарные флаги одобрения
+        // Explorer, НЕ команды запуска (путь не извлекается, значения перезаписываются
+        // Windows при каждом запуске приложений → лавина ложных алертов).
         return list;
     }
 
@@ -2063,9 +2908,12 @@ public sealed class AutoStartMonitor : IDisposable
             return false;
         }
 
-        // 3.0.0.41: новые точки — точные маркеры ДО общих проверок.
+        // 3.0.0.41 / P3-3: StartupApproved — бинарные флаги одобрения Explorer, НЕ команды
+        // запуска (путь к исполняемому файлу не извлекается, «Программа: 02000000...»).
+        // Windows перезаписывает эти значения при каждом запуске приложений → лавина
+        // ложных алертов (WindowsDefender/CatGuardian). Исключаем из детекции полностью.
         if (keyPath.Contains("StartupApproved", StringComparison.OrdinalIgnoreCase))
-            return _config.AutoStartCheckStartupApproved;
+            return false;
         if (keyPath.Contains("Active Setup", StringComparison.OrdinalIgnoreCase))
             return _config.AutoStartCheckActiveSetup;
         if (keyPath.Contains("ShellServiceObjectDelayLoad", StringComparison.OrdinalIgnoreCase))
@@ -2141,6 +2989,19 @@ public sealed class AutoStartMonitor : IDisposable
         try
         {
             return !string.IsNullOrWhiteSpace(_service.Config.GetSetting(StartupSnapshotSetting));
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>true — снапшот задач планировщика уже снят (setting существует, даже если пуст).</summary>
+    private bool TaskSnapshotExists()
+    {
+        try
+        {
+            return !string.IsNullOrWhiteSpace(_service.Config.GetSetting(TaskSnapshotSetting));
         }
         catch
         {

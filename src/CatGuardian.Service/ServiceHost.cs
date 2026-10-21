@@ -84,6 +84,22 @@ public sealed class ServiceHost : IDisposable
     private (string FileVersion, long Length, DateTime LastWriteUtc)? _trayHostEtag;
     private const string TrayHostExeName = "CatGuardian.TrayHost.exe";
 
+    // 3.0.1.6 (P0 3.7): heartbeat per-session агента Winlock Shield (TrayHost шлёт каждые 3 с).
+    // Ключ — sessionId; значение — время последнего heartbeat. Watchdog: 25 с без heartbeat
+    // (3 с × 3 пропуска + запас на GC-паузу 5 с) → kill TrayHost + перезапуск.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, DateTime> _trayHostHeartbeat = new();
+    private System.Threading.Timer? _trayHostHeartbeatTimer;
+    // 3.0.1.6-fix (D5): 25 → 60 с. На перегруженной ВМ (100% CPU) TrayHost может не получать
+    // квант планировщика дольше 25 с — прежде watchdog убивал «замороженный» хост при
+    // обычной перегрузке (логи ВМ: kill в 18:47:45), иконка гасла. 60 с + защита от
+    // перегрузки в CheckTrayHostHeartbeat (не убиваем при SysCPU >= 90%).
+    private static readonly TimeSpan TrayHostHeartbeatTimeout = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan TrayHostHeartbeatCheckInterval = TimeSpan.FromSeconds(5);
+    // 3.0.1.6 (P0 3.8): fallback при недоступном TrayHost — защита от повторного входа.
+    private bool _winlockFallbackInProgress;
+    private DateTime _lastWinlockFallbackUtc = DateTime.MinValue;
+    private static readonly TimeSpan WinlockFallbackCooldown = TimeSpan.FromSeconds(60);
+
     public ServiceHost(int? panelPidArg = null)
     {
         _panelPidArg = panelPidArg;
@@ -804,7 +820,21 @@ public sealed class ServiceHost : IDisposable
             _trayHostServer.StatusHandler = GetTrayHostStatusJson;
             // 3.0.0.63: детект буфера из интерактивной сессии (хост трея) → обработчик антивируса.
             _trayHostServer.ClipboardAlertHandler = _antivirus.HandleTrayClipboardAlert;
+            // 3.0.1.6 (требование 3.4): решение пользователя из POPUP хоста трея (панель
+            // недоступна) — «Завершить» / «В песочницу» / «Разморозить».
+            _trayHostServer.AlertActionHandler = HandleTrayAlertAction;
+            // 3.0.1.6 (P0 3.7): детект блокировки экрана от per-session агента TrayHost.
+            _trayHostServer.WinlockDetectedHandler = _antivirus.HandleWinlockDetected;
+            _trayHostServer.WinlockSoftHandler = _antivirus.HandleWinlockSoft;
+            _trayHostServer.HeartbeatHandler = OnTrayHostHeartbeat;
+            _trayHostServer.TrayHostReadyHandler = (sessionId, pid, version) =>
+                GuardianLog.Info($"TRAYHOST-IPC: агент готов (session {sessionId}, pid {pid}, v{version}).");
             _trayHostServer.Start();
+
+            // 3.0.1.6 (P0 3.7): watchdog heartbeat TrayHost — 25 с без heartbeat → kill+restart.
+            _trayHostHeartbeatTimer = new System.Threading.Timer(
+                _ => CheckTrayHostHeartbeat(), null,
+                TrayHostHeartbeatCheckInterval, TrayHostHeartbeatCheckInterval);
 
             _alertQueue = new InteractiveAlertQueue(
                 isPanelRunning: _ => IsPanelProcessRunning(),
@@ -815,8 +845,9 @@ public sealed class ServiceHost : IDisposable
                 autoResolveAction: AutoResolveAlert);
             // 3.0.0.63: kind алерта передаётся хосту — PrivacyShieldAlert
             // показывает только баллун (информационный вид), остальные — POPUP/баллун.
-            _alertQueue.AlertBalloonRequested += (kind, title, text) =>
-                _trayHostServer.PushAlert(title, text, (int)kind);
+            // 3.0.1.6 (требование 3.4): actionKey/pid/processPath — для кнопок решения POPUP.
+            _alertQueue.AlertBalloonRequested += (kind, title, text, actionKey, pid, processPath) =>
+                _trayHostServer.PushAlert(title, text, (int)kind, actionKey, pid, processPath);
             // 3.0.0.93: алерт снят (извлекли флэшку) → хост трея закрывает POPUP.
             _alertQueue.AlertDismissRequested += kind =>
                 _trayHostServer.PushAlertDismiss((int)kind);
@@ -1083,21 +1114,222 @@ public sealed class ServiceHost : IDisposable
                 break;
 
             case InteractiveAlertQueue.AutoResolveKind.Sandbox:
-                // E1b (3.0.0.68): модуль «Песочница» временно не скомпилирован —
-                // авто-решение не отправляется, инцидент остаётся в журнале.
+                // 3.0.1.6 (требование 3.4): авто-резолв при недоступной панели — НЕ «доверять/
+                // ничего», а Kill виновника (в логах VM песочница видела вирус, но не блокировала:
+                // дедуп + failed to terminate + авто-«доверять»).
+                // P22 (КРИТИЧЕСКОЕ): карантин по авто-резолву/нажатию «Завершить» — ЛОЖНОЕ
+                // срабатывание (ВМ6: 52725.exe риск 40/100 карантинен «Sandbox.AutoResolve»).
+                // Карантин — ТОЛЬКО при реальном детекте (сканер/хэш/winlock/создатель dropper'а
+                // через P21 TryQuarantineCreatorFile). Авто-резолв = только kill процесса.
                 GuardianLog.Warning(
-                    $"ALERT-AUTORESOLVE: Sandbox «доверять пути» {entry.ProcessPath} (модуль не скомпилирован, E1b).");
+                    $"ALERT-AUTORESOLVE: Sandbox «kill» PID {entry.Pid} ({entry.ProcessPath}) — панель недоступна, окно {InteractiveAlertQueue.AutoResolveTimeoutText}.");
+                KillProcessTreeSafe(entry.Pid);
                 break;
 
             case InteractiveAlertQueue.AutoResolveKind.Winlock:
-                _antivirus.HandleWinlockAction(new WinlockActionDto
+                // 3.0.1.6 (P1-3): WinlockShield-алерт (actionKey с префиксом «winlock_shield:») —
+                // авто-резолв НЕ восстанавливает баннер! Файл остаётся в карантине (KeepIsolated).
+                // Старый AutoStart-Winlock — «восстановить и доверять» (как раньше).
+                if (entry.ActionKey.StartsWith("winlock_shield:", StringComparison.Ordinal))
                 {
-                    ActionKey = entry.ActionKey,
-                    Action = WinlockActionKind.RestoreAndTrust,
-                });
-                GuardianLog.Warning(
-                    $"ALERT-AUTORESOLVE: Winlock «восстановить и доверять» ({entry.ActionKey}) — панель недоступна.");
+                    _antivirus.HandleWinlockAction(new WinlockActionDto
+                    {
+                        ActionKey = entry.ActionKey,
+                        Action = WinlockActionKind.KeepIsolated,
+                        FilePath = entry.ProcessPath,
+                    });
+                    GuardianLog.Warning(
+                        $"ALERT-AUTORESOLVE: WinlockShield «оставить изолированным» ({entry.ActionKey}) — панель недоступна, окно {InteractiveAlertQueue.AutoResolveTimeoutText}.");
+                }
+                else
+                {
+                    _antivirus.HandleWinlockAction(new WinlockActionDto
+                    {
+                        ActionKey = entry.ActionKey,
+                        Action = WinlockActionKind.RestoreAndTrust,
+                    });
+                    GuardianLog.Warning(
+                        $"ALERT-AUTORESOLVE: Winlock «восстановить и доверять» ({entry.ActionKey}) — панель недоступна.");
+                }
                 break;
+        }
+    }
+
+    /// <summary>3.0.1.6 (требование 3.4): принудительное завершение дерева процесса
+    /// (taskkill /F /T с фолбэком Process.Kill) — авто-KILL при недоступной панели.</summary>
+    private static void KillProcessTreeSafe(int pid)
+    {
+        if (pid <= 0)
+        {
+            return;
+        }
+
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = System.IO.Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.System), "taskkill.exe"),
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                Arguments = $"/F /T /PID {pid}",
+            };
+            using var proc = System.Diagnostics.Process.Start(psi);
+            proc?.WaitForExit(3000);
+        }
+        catch
+        {
+            try
+            {
+                using var p = System.Diagnostics.Process.GetProcessById(pid);
+                p.Kill(entireProcessTree: true);
+            }
+            catch { /* процесс уже завершился */ }
+        }
+    }
+
+    /// <summary>
+    /// 3.0.1.6 (требование 3.4): решение пользователя из POPUP хоста трея, когда панель
+    /// недоступна. Применяет выбранное действие к виновнику (Kill / В песочницу / Разморозить),
+    /// снимает запись из очереди алертов (чтобы страховочный авто-резолв не переопределил
+    /// решение) и закрывает POPUP. Возвращает "" при успехе, текст ошибки при отказе.
+    /// </summary>
+    private string HandleTrayAlertAction(int kind, string actionKey, int pid, string processPath, string action)
+    {
+        try
+        {
+            var mk = (IpcProtocol.MessageKind)kind;
+            GuardianLog.Warning(
+                $"TRAYHOST-ALERT-ACTION: kind={mk} action={action} pid={pid} path={processPath} key={actionKey}");
+
+            switch (mk)
+            {
+                case IpcProtocol.MessageKind.SandboxAlert:
+                {
+                    SandboxActionKindDto? sandboxAction = action switch
+                    {
+                        "kill" => SandboxActionKindDto.KillProcess,
+                        "sandbox" => SandboxActionKindDto.LaunchInSandbox,
+                        "trust" => SandboxActionKindDto.TrustPath,
+                        "resume" => SandboxActionKindDto.AllowResume,
+                        _ => null,
+                    };
+                    if (sandboxAction is null)
+                    {
+                        return "invalid_action";
+                    }
+                    _antivirus.HandleSandboxAction(new SandboxActionDto
+                    {
+                        Action = sandboxAction.Value,
+                        Pid = pid,
+                        ProcessPath = processPath,
+                    });
+                    break;
+                }
+
+                case IpcProtocol.MessageKind.SpywareAlert:
+                {
+                    SpywareActionKind? spyAction = action switch
+                    {
+                        "kill" => SpywareActionKind.KillProcess,
+                        "trust" => SpywareActionKind.TrustProcess,
+                        "block" => SpywareActionKind.BlockProcess,
+                        _ => null,
+                    };
+                    if (spyAction is null)
+                    {
+                        return "invalid_action";
+                    }
+                    _antivirus.HandleSpywareAction(new SpywareActionDto
+                    {
+                        ActionKey = actionKey,
+                        Pid = pid,
+                        ProcessPath = processPath,
+                        Kind = spyAction.Value,
+                    });
+                    break;
+                }
+
+                case IpcProtocol.MessageKind.AntiStealerAlert:
+                {
+                    AntiStealerActionKind? asAction = action switch
+                    {
+                        "kill" => AntiStealerActionKind.KillProcess,
+                        "trust" => AntiStealerActionKind.TrustProcess,
+                        _ => null,
+                    };
+                    if (asAction is null)
+                    {
+                        return "invalid_action";
+                    }
+                    _antivirus.HandleAntiStealerAction(new AntiStealerActionDto
+                    {
+                        ActionKey = actionKey,
+                        Pid = pid,
+                        Kind = asAction.Value,
+                    });
+                    break;
+                }
+
+                case IpcProtocol.MessageKind.WinlockAlert:
+                {
+                    // 3.0.1.6 (P1-3): WinlockShield-алерт (actionKey с префиксом «winlock_shield:») —
+                    // trust = whitelist + восстановление из карантина, delete = удаление из карантина,
+                    // kill = оставить изолированным. Служба применяет их по processPath.
+                    if (actionKey.StartsWith("winlock_shield:", StringComparison.Ordinal))
+                    {
+                        WinlockActionKind? wlShieldAction = action switch
+                        {
+                            "trust" => WinlockActionKind.TrustAndRestore,
+                            "delete" => WinlockActionKind.DeleteFile,
+                            "kill" => WinlockActionKind.KeepIsolated,
+                            _ => null,
+                        };
+                        if (wlShieldAction is null)
+                        {
+                            return "invalid_action";
+                        }
+                        _antivirus.HandleWinlockAction(new WinlockActionDto
+                        {
+                            ActionKey = actionKey,
+                            Action = wlShieldAction.Value,
+                            FilePath = processPath,
+                        });
+                        break;
+                    }
+
+                    WinlockActionKind? wlAction = action switch
+                    {
+                        "trust" => WinlockActionKind.RestoreAndTrust,
+                        "kill" => WinlockActionKind.KeepIsolated,
+                        _ => null,
+                    };
+                    if (wlAction is null)
+                    {
+                        return "invalid_action";
+                    }
+                    _antivirus.HandleWinlockAction(new WinlockActionDto
+                    {
+                        ActionKey = actionKey,
+                        Action = wlAction.Value,
+                    });
+                    break;
+                }
+
+                default:
+                    return "unsupported_kind";
+            }
+
+            // Решение принято — снимаем запись из очереди (авто-резолв не должен её переопределить)
+            // и закрываем POPUP хоста трея.
+            try { _alertQueue?.RemoveByActionKey(actionKey); } catch { /* очередь могла быть уже снята */ }
+            try { _trayHostServer.PushAlertDismiss(kind); } catch { /* хост мог отключиться */ }
+            return "";
+        }
+        catch (Exception ex)
+        {
+            GuardianLog.Error("TRAYHOST-ALERT-ACTION: ошибка применения решения пользователя", ex);
+            return "error";
         }
     }
 
@@ -1182,6 +1414,218 @@ public sealed class ServiceHost : IDisposable
         }
     }
 
+    /// <summary>3.0.1.6 (P0 3.7): heartbeat per-session агента Winlock Shield (TrayHost, каждые 3 с).</summary>
+    private void OnTrayHostHeartbeat(int sessionId, int pid)
+    {
+        try
+        {
+            _trayHostHeartbeat[sessionId] = DateTime.UtcNow;
+        }
+        catch
+        {
+            // не критично
+        }
+    }
+
+    /// <summary>
+    /// 3.0.1.6 (P0 3.7/3.8): watchdog heartbeat TrayHost. 25 с без heartbeat (замороженный
+    /// TrayHost через NtSuspendProcess) → kill TrayHost + перезапуск. Если Explorer отсутствует
+    /// в активной сессии И heartbeat мёртв ≥5 с → P0 3.8 fallback: форк TrayHost (3 попытки) →
+    /// восстановление explorer.exe + ERROR + алерт. kill «подозрительного процесса» ЗАПРЕЩЁН.
+    /// </summary>
+    private void CheckTrayHostHeartbeat()
+    {
+        try
+        {
+            if (_disposed || _shuttingDown)
+            {
+                return;
+            }
+
+            var activeSession = SessionProcessLauncher.GetActiveConsoleSessionId();
+            if (activeSession == 0xFFFFFFFF)
+            {
+                return; // нет активной сессии
+            }
+
+            var now = DateTime.UtcNow;
+            var lastHeartbeat = _trayHostHeartbeat.TryGetValue((int)activeSession, out var hb)
+                ? hb
+                : DateTime.MinValue;
+
+            // Heartbeat мёртв (>25 с назад). ВАЖНО: если записи ещё НЕТ (lastHeartbeat=MinValue —
+            // TrayHost только запущен и не успел прислать первый heartbeat), НЕ считаем мёртвым —
+            // иначе на старте системы (Explorer ещё грузится) сработает ложный fallback 3.8.
+            var heartbeatDead = lastHeartbeat != DateTime.MinValue
+                                && now - lastHeartbeat > TrayHostHeartbeatTimeout;
+
+            // Explorer отсутствует в активной сессии (баннер мог убить его).
+            var explorerMissing = !IsExplorerInSession(activeSession);
+
+            if (heartbeatDead && explorerMissing)
+            {
+                // P0 3.8: TrayHost недоступен + Explorer убит → fallback.
+                WinlockShieldFallback(activeSession);
+                return;
+            }
+
+            if (heartbeatDead && IsTrayHostRunningInSession(activeSession))
+            {
+                var elapsed = (now - lastHeartbeat).TotalSeconds;
+                // 3.0.1.6-fix (D5): при перегрузке системы (SysCPU >= 90%) НЕ убиваем TrayHost —
+                // он просто не получает квант (ВМ 4 ГБ, 100% CPU). Иначе бесконечный kill-loop
+                // и серая иконка. Только предупреждение; следующий тик (через 5 с) повторит.
+                if (GetSystemCpuLoadPercent() >= 90)
+                {
+                    GuardianLog.Warning(
+                        $"TRAYHOST-HEARTBEAT: heartbeat отсутствует {elapsed:F0} с (session {activeSession}), " +
+                        "SysCPU >= 90% — перегрузка, kill отменён.");
+                    return;
+                }
+
+                // Замороженный TrayHost (NtSuspendProcess): heartbeat не приходит, процесс жив.
+                GuardianLog.Error(
+                    $"TRAYHOST-HEARTBEAT: heartbeat отсутствует >{TrayHostHeartbeatTimeout.TotalSeconds} с " +
+                    $"(session {activeSession}, {elapsed:F0} с) — TrayHost заморожен, kill + перезапуск.");
+                KillTrayHostsInOtherSessions(0xFFFFFFFF); // убить ВСЕ хосты
+                _trayHostHeartbeat[(int)activeSession] = DateTime.MinValue;
+                TryEnsureTrayHostInUserSession(force: true);
+            }
+        }
+        catch (Exception ex)
+        {
+            GuardianLog.Error("TRAYHOST-HEARTBEAT: ошибка watchdog", ex);
+        }
+    }
+
+    /// <summary>Explorer присутствует в указанной сессии?</summary>
+    private static bool IsExplorerInSession(uint sessionId)
+    {
+        try
+        {
+            foreach (var p in Process.GetProcessesByName("explorer"))
+            {
+                using (p)
+                {
+                    if ((uint)p.SessionId == sessionId)
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        catch { /* перечисление недоступно */ }
+        return false;
+    }
+
+    /// <summary>Загрузка CPU всей системы (0-100). PerformanceCounter «Processor % Processor Time».</summary>
+    private static float GetSystemCpuLoadPercent()
+    {
+        try
+        {
+            using var counter = new PerformanceCounter("Processor", "% Processor Time", "_Total");
+            counter.NextValue();
+            Thread.Sleep(300);
+            var v = counter.NextValue();
+            return v < 0 ? 0f : v;
+        }
+        catch
+        {
+            return 0f; // счётчик недоступен (редкие системы) — считаем, что перегрузки нет
+        }
+    }
+
+    /// <summary>
+    /// 3.0.1.6 (P0 3.8): fallback при недоступном TrayHost. НЕ КИЛЛ подозрительных процессов
+    /// (служба слепа без оконного контекста — это DDoS на пользовательскую сессию):
+    /// 1) форк TrayHost (3 попытки с backoff 1→2→4 с); 2) если форк успешен → управление TrayHost;
+    /// 3) если нет → восстановить explorer.exe (безопасно, из System32) + ERROR + алерт.
+    /// </summary>
+    private void WinlockShieldFallback(uint sessionId)
+    {
+        try
+        {
+            if (_winlockFallbackInProgress)
+            {
+                return;
+            }
+            if (DateTime.UtcNow - _lastWinlockFallbackUtc < WinlockFallbackCooldown)
+            {
+                return;
+            }
+            _winlockFallbackInProgress = true;
+            _lastWinlockFallbackUtc = DateTime.UtcNow;
+
+            try
+            {
+                GuardianLog.Error(
+                    $"WINLOCK-SHIELD DEGRADED: TrayHost недоступен (heartbeat мёртв) + Explorer отсутствует " +
+                    $"(session {sessionId}) — fallback 3.8.");
+
+                // 0) Убить зависший TrayHost (не шлёт heartbeat, но процесс жив) — иначе
+                // после форка в сессии останутся ДВА хоста (зависший + новый).
+                KillTrayHostsInOtherSessions(0xFFFFFFFF);
+
+                // 1) Форк TrayHost (3 попытки с backoff 1→2→4 с).
+                var trayHostExe = GuardianPaths.SiblingExe(TrayHostExeName);
+                var forked = false;
+                if (File.Exists(trayHostExe))
+                {
+                    var delays = new[] { 1, 2, 4 };
+                    foreach (var delaySec in delays)
+                    {
+                        if (_disposed || _shuttingDown)
+                        {
+                            break;
+                        }
+                        var ok = SessionProcessLauncher.LaunchInActiveSession(trayHostExe, null, sessionId);
+                        GuardianLog.Info($"WINLOCK-SHIELD: форк TrayHost (попытка, задержка {delaySec} с) = {ok}");
+                        if (ok)
+                        {
+                            forked = true;
+                            break;
+                        }
+                        Thread.Sleep(TimeSpan.FromSeconds(delaySec));
+                    }
+                }
+
+                if (forked)
+                {
+                    GuardianLog.Info("WINLOCK-SHIELD: TrayHost перезапущен — управление возвращено агенту.");
+                    return;
+                }
+
+                // 3) Восстановить explorer.exe (безопасно, из System32) + ERROR + алерт.
+                var explorer = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe");
+                var okExplorer = SessionProcessLauncher.LaunchInActiveSession(explorer, null, sessionId);
+                GuardianLog.Error(
+                    $"WINLOCK-SHIELD DEGRADED: TrayHost не перезапущен (3 попытки), восстановление Explorer = {okExplorer}. " +
+                    "Требуется вмешательство: проверьте CatGuardian.TrayHost.exe и службу.");
+
+                // Алерт оператору (Event Log source CatGuardian).
+                try
+                {
+                    using var log = new System.Diagnostics.EventLog("Application");
+                    log.Source = "CatGuardian";
+                    log.WriteEntry(
+                        "WinlockShield DEGRADED: TrayHost недоступен, Explorer восстановлен службой. " +
+                        "Проверьте CatGuardian.TrayHost.exe (подпись, целостность) и службу.",
+                        System.Diagnostics.EventLogEntryType.Error, 7001);
+                }
+                catch { /* Event Log недоступен */ }
+            }
+            finally
+            {
+                _winlockFallbackInProgress = false;
+            }
+        }
+        catch (Exception ex)
+        {
+            GuardianLog.Error("WINLOCK-SHIELD: ошибка fallback 3.8", ex);
+            _winlockFallbackInProgress = false;
+        }
+    }
+
     /// <summary>
     /// Вход пользователя в систему: сбрасываем флаг «пользовательского выхода» (новый вход —
     /// новое намерение; иначе после «Выход» в прошлой сессии хост не поднялся бы) и сразу
@@ -1192,6 +1636,12 @@ public sealed class ServiceHost : IDisposable
         try
         {
             try { using var s = new SuiteSettings(); s.SetBool("panel_exit_requested", false); } catch { }
+
+            // 3.0.1.6 (P2-1): при входе пользователя жёстко восстанавливаем точку входа
+            // Windows (Winlogon\Shell/Userinit) — баннер мог подменить её до перезагрузки
+            // (лог ВМ 16.10: оболочка не запускалась, пока Shell не вернули на explorer.exe).
+            try { _antivirus.RepairWinlogonShellNow(); } catch (Exception ex) { GuardianLog.Error("WINLOCK-SHIELD: ремонт Winlogon при входе", ex); }
+
             TryEnsureTrayHostInUserSession(force: true);
         }
         catch (Exception ex)
@@ -1219,6 +1669,14 @@ public sealed class ServiceHost : IDisposable
         try
         {
             if (_disposed || _shuttingDown) return;
+
+            // D6: во время удаления (флаг Uninstalling в реестре) TrayHost НЕ возрождаем —
+            // иначе установщик не сможет удалить занятые файлы (TRAY-WATCH воскрешал хост).
+            if (IsUninstallingFlagSet())
+            {
+                GuardianLog.Info("TRAY-WATCH: пропуск — идёт удаление (Uninstalling=1).");
+                return;
+            }
 
             var activeSession = SessionProcessLauncher.GetActiveConsoleSessionId();
             if (activeSession == 0xFFFFFFFF)
@@ -1378,6 +1836,21 @@ public sealed class ServiceHost : IDisposable
         }
     }
 
+    /// <summary>Идёт удаление (установщик выставил HKLM\SOFTWARE\CatGuardian\Uninstalling=1)?</summary>
+    private static bool IsUninstallingFlagSet()
+    {
+        try
+        {
+            using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
+                @"SOFTWARE\CatGuardian");
+            return key?.GetValue("Uninstalling") is int v && v == 1;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     public void Dispose()
     {
         // Идемпотентность: Dispose вызывается и из обработчика Shutdown (Program.cs),
@@ -1392,6 +1865,9 @@ public sealed class ServiceHost : IDisposable
         // 3.0.0.58-trayhost: отключаем перехватчик и освобождаем канал хоста.
         _trayHostEventsTimer?.Dispose();
         _trayHostEventsTimer = null;
+        // 3.0.1.6 (P0 3.7): watchdog heartbeat per-session агента Winlock Shield.
+        _trayHostHeartbeatTimer?.Dispose();
+        _trayHostHeartbeatTimer = null;
         PanelPipeClient.InteractiveAlertInterceptor = null;
         _alertQueue?.Dispose();
         _alertQueue = null;

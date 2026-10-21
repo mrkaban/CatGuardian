@@ -6,6 +6,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using CatGuardian.Antivirus.Core;
 using CatGuardian.Antivirus.Core.Configuration;
 using CatGuardian.Antivirus.Core.Logging;
 using CatGuardian.Antivirus.Core.ProcessPairs;
@@ -279,7 +280,13 @@ public sealed class EtwBehaviorMonitor : IDisposable
             var name = data.ProcessName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
                 ? data.ProcessName
                 : data.ProcessName + ".exe";
-            if (!SystemProcessNames.Contains(name)) return;
+            // W3-8 (3.0.1.6-fix): кириллический маскарад «ехрlоrеr.exe» нормализуется к
+            // «explorer.exe» — иначе SystemProcessNames (латинские имена) молча пропускает
+            // баннер (лог ВМ 15.10.2026: «ETW: маскарад» отсутствует для C:\WINDОWS\ехрlоrеr.exe).
+            // НеNeverKill/NoAutoKill проверки ниже идут по ОРИГИНАЛЬНОМУ имени (кириллица не
+            // входит в латинские списки) — авто-kill маскарада разрешён, реального explorer — нет.
+            var normalizedName = MasqueradeNames.NormalizeForComparison(name);
+            if (!SystemProcessNames.Contains(name) && !SystemProcessNames.Contains(normalizedName)) return;
 
             // Диагностика 3.0.0.16.1: все запуски системных имён (для отладки маскарада).
             // 3.0.0.41.1: дополнительно показываем, что вернул общий кэш по этому PID, —

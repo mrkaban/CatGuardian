@@ -797,7 +797,10 @@ public sealed class TrafficThreatMonitor : IDisposable
         {
             try
             {
-                var result = await _store.UpdateFromRemoteAsync(_config).ConfigureAwait(false);
+                // D7 (3.0.1.6): ручное обновление (кнопка панели / авто-таймер RequestListsRefresh)
+                // ВСЕГДА качает заново (force:true) — TTL-кэш применяется только к авто-циклу
+                // RunScheduledUpdateAsync → RefreshListsAsync (force по умолчанию false).
+                var result = await _store.UpdateFromRemoteAsync(_config, default, force: true).ConfigureAwait(false);
                 _logger.Info(LogCategory.Realtime,
                     result.Ok
                         ? $"Анти-майнер: списки пулов обновлены ({result.Domains} доменов)."

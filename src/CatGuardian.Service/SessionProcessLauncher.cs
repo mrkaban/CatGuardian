@@ -32,6 +32,13 @@ public static class SessionProcessLauncher
     private const int StartfUseShowWindow = 0x00000001;
     private const short SwShow = 5;
 
+    // CREATE_UNICODE_ENVIRONMENT (0x400): lpEnvironment — Unicode-блок.
+    // P4-A (3.0.1.6): блок от CreateEnvironmentBlock всегда Unicode; без этого флага
+    // CreateProcessAsUser трактует его как ANSI → ERROR_INVALID_PARAMETER (87) →
+    // ломались ВСЕ запуски через LaunchInActiveSession/LaunchElevatedInActiveSession
+    // (восстановление Explorer, панель, TrayHost) — лог ВМ3 «SVC-LAUNCH: err=87».
+    private const uint CreateUnicodeEnvironment = 0x00000400;
+
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern uint WTSGetActiveConsoleSessionId();
 
@@ -59,6 +66,12 @@ public static class SessionProcessLauncher
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool CloseHandle(IntPtr hObject);
+
+    [DllImport("userenv.dll", SetLastError = true)]
+    private static extern bool CreateEnvironmentBlock(out IntPtr lpEnvironment, IntPtr hToken, bool bInherit);
+
+    [DllImport("userenv.dll", SetLastError = true)]
+    private static extern bool DestroyEnvironmentBlock(IntPtr lpEnvironment);
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct STARTUPINFO
@@ -106,6 +119,7 @@ public static class SessionProcessLauncher
 
         EnableRequiredPrivileges();
 
+        IntPtr envBlock = IntPtr.Zero;
         try
         {
             var sid = sessionId ?? WTSGetActiveConsoleSessionId();
@@ -126,6 +140,18 @@ public static class SessionProcessLauncher
                     return false;
                 }
 
+                // P3-2: окружение пользователя. Без него CreateProcessAsUser наследует
+                // окружение SYSTEM (USERPROFILE=systemprofile) — explorer показывал пустой
+                // рабочий стол («C:\Windows\system32\config\systemprofile\Desktop недоступен»).
+                if (CreateEnvironmentBlock(out envBlock, userToken, false) && envBlock != IntPtr.Zero)
+                {
+                    // окружение пользователя построено
+                }
+                else
+                {
+                    envBlock = IntPtr.Zero; // недоступно — наследуем окружение службы
+                }
+
                 try
                 {
                     var si = new STARTUPINFO
@@ -140,8 +166,14 @@ public static class SessionProcessLauncher
                         ? $"\"{exePath}\""
                         : $"\"{exePath}\" {arguments}";
 
+                    var cwd = envBlock != IntPtr.Zero ? EnvValue(envBlock, "USERPROFILE") : null;
+
+                    // P4-A: при передаче блока окружения обязателен CREATE_UNICODE_ENVIRONMENT
+                    // (блок от CreateEnvironmentBlock всегда Unicode). Без флага — err=87.
+                    var flags = envBlock != IntPtr.Zero ? CreateUnicodeEnvironment : 0u;
+
                     if (!CreateProcessAsUser(primaryToken, null, cmdLine, IntPtr.Zero, IntPtr.Zero,
-                            false, 0, IntPtr.Zero, null, ref si, out var pi))
+                            false, flags, envBlock, cwd, ref si, out var pi))
                     {
                         GuardianLog.Warning($"SVC-LAUNCH: CreateProcessAsUser err={Marshal.GetLastWin32Error()}");
                         return false;
@@ -164,6 +196,13 @@ public static class SessionProcessLauncher
         catch
         {
             return false;
+        }
+        finally
+        {
+            if (envBlock != IntPtr.Zero)
+            {
+                try { DestroyEnvironmentBlock(envBlock); } catch { /* не критично */ }
+            }
         }
     }
 
@@ -221,6 +260,31 @@ public static class SessionProcessLauncher
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// P3-2: извлекает значение переменной из блока окружения "K=V\0K=V\0\0"
+    /// (блок, возвращённый <see cref="CreateEnvironmentBlock"/>). null — не найдено.
+    /// </summary>
+    private static string? EnvValue(IntPtr block, string name)
+    {
+        try
+        {
+            long offset = 0;
+            while (true)
+            {
+                var raw = Marshal.PtrToStringUni(IntPtr.Add(block, (int)offset));
+                if (string.IsNullOrEmpty(raw)) break; // конец блока
+                var eq = raw.IndexOf('=');
+                if (eq > 0 && string.Equals(raw.Substring(0, eq), name, StringComparison.OrdinalIgnoreCase))
+                {
+                    return raw.Substring(eq + 1);
+                }
+                offset += (long)(raw.Length + 1) * 2;
+            }
+        }
+        catch { /* блок недоступен */ }
+        return null;
     }
 
     private static string? QuerySessionString(int sessionId, int infoClass)
@@ -345,6 +409,7 @@ public static class SessionProcessLauncher
 
         IntPtr userToken = IntPtr.Zero;
         IntPtr primaryToken = IntPtr.Zero;
+        IntPtr envBlock = IntPtr.Zero;
         try
         {
             var sessionId = WTSGetActiveConsoleSessionId();
@@ -392,6 +457,17 @@ public static class SessionProcessLauncher
                 }
             }
 
+            // P3-2: окружение пользователя (иначе дочерний процесс наследует окружение
+            // SYSTEM — USERPROFILE=systemprofile, GUI-процессы используют системный профиль).
+            if (CreateEnvironmentBlock(out envBlock, userToken, false) && envBlock != IntPtr.Zero)
+            {
+                // окружение пользователя построено
+            }
+            else
+            {
+                envBlock = IntPtr.Zero; // недоступно — наследуем окружение службы
+            }
+
             var si = new STARTUPINFO
             {
                 cb = Marshal.SizeOf(typeof(STARTUPINFO)),
@@ -404,8 +480,14 @@ public static class SessionProcessLauncher
                 ? $"\"{exePath}\""
                 : $"\"{exePath}\" {arguments}";
 
+            var cwd = envBlock != IntPtr.Zero ? EnvValue(envBlock, "USERPROFILE") : null;
+
+            // P4-A: при передаче блока окружения обязателен CREATE_UNICODE_ENVIRONMENT
+            // (блок от CreateEnvironmentBlock всегда Unicode). Без флага — err=87.
+            var flags = envBlock != IntPtr.Zero ? CreateUnicodeEnvironment : 0u;
+
             if (!CreateProcessAsUser(primaryToken, null, cmdLine, IntPtr.Zero, IntPtr.Zero,
-                    false, 0, IntPtr.Zero, null, ref si, out var pi))
+                    false, flags, envBlock, cwd, ref si, out var pi))
             {
                 GuardianLog.Warning($"SVC-LAUNCH(elevated): CreateProcessAsUser err={Marshal.GetLastWin32Error()}");
                 return false;
@@ -421,6 +503,10 @@ public static class SessionProcessLauncher
         }
         finally
         {
+            if (envBlock != IntPtr.Zero)
+            {
+                try { DestroyEnvironmentBlock(envBlock); } catch { /* не критично */ }
+            }
             if (primaryToken != IntPtr.Zero) CloseHandle(primaryToken);
             if (userToken != IntPtr.Zero) CloseHandle(userToken);
         }

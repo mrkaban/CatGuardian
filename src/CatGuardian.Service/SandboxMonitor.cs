@@ -284,9 +284,13 @@ public sealed class SandboxMonitor : IDisposable
             }
 
             // Cooldown по пути и Skip.
+            // 3.0.1.6 (требование C): к risk-зонам cooldown НЕ применяется — повторный запуск
+            // вируса обязан алертить снова (в логах VM SANDBOX DEDUP «уже уведомлён (0 с)»
+            // подавлял повторные запуски одного и того же вируса).
             var now = DateTime.UtcNow;
-            if (_lastAlertUtc.TryGetValue(path, out var last) &&
-                now - last < TimeSpan.FromMinutes(Math.Max(1, _config.SandboxAlertCooldownMinutes)))
+            if (!IsRiskZonePath(path)
+                && _lastAlertUtc.TryGetValue(path, out var last)
+                && now - last < TimeSpan.FromMinutes(Math.Max(1, _config.SandboxAlertCooldownMinutes)))
             {
                 return;
             }
@@ -373,6 +377,17 @@ public sealed class SandboxMonitor : IDisposable
                 ? "сеть будет заблокирована (режим " + netMode + ")"
                 : "сеть разрешена (режим " + netMode + ")";
 
+            // P23 (КРИТИЧЕСКОЕ): время создания процесса — для PID-reuse сверки при «Завершить»
+            // (KillForced с expectedStartUtc). Без неё KillForced(pid) убил бы переиспользованный
+            // легитимный процесс (MatchesIdentity(null) = true для любого живого).
+            System.DateTime startUtc = System.DateTime.MinValue;
+            try
+            {
+                using var proc = Process.GetProcessById(pid);
+                startUtc = proc.StartTime.ToUniversalTime();
+            }
+            catch { /* процесс завершился — StartTime неизвестен, сверка невозможна */ }
+
             var alert = new SandboxAlertDto
             {
                 ActionKey = path,
@@ -380,6 +395,7 @@ public sealed class SandboxMonitor : IDisposable
                 ProcessName = data.ProcessName ?? Path.GetFileNameWithoutExtension(path),
                 ProcessPath = path,
                 CommandLine = data.CommandLine ?? "",
+                StartTimeUtc = startUtc,
                 RiskScore = rep.RiskScore,
                 RiskSummary = rep.RiskSummary,
                 SignatureText = DescribeSignature(rep),
@@ -452,6 +468,116 @@ public sealed class SandboxMonitor : IDisposable
         }
 
         return false;
+    }
+
+    /// <summary>3.0.1.6 (требование C): risk-зона — Desktop/Temp/Downloads/Documents/Public +
+    /// <c>PreScanSuspiciousFolders</c> + баннерные имена. Для risk-зон повторные запуски
+    /// не подавляются cooldown'ом песочницы.</summary>
+    private bool IsRiskZonePath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return false;
+        }
+
+        try
+        {
+            var name = Path.GetFileName(path);
+            if (!string.IsNullOrEmpty(name)
+                && (name.StartsWith("video", StringComparison.OrdinalIgnoreCase)
+                    || name.StartsWith("lock", StringComparison.OrdinalIgnoreCase)
+                    || name.StartsWith("banner", StringComparison.OrdinalIgnoreCase)))
+            {
+                return true;
+            }
+
+            foreach (var zone in EnumerateRiskFolders())
+            {
+                if (IsInsideDir(path, zone))
+                {
+                    return true;
+                }
+            }
+        }
+        catch
+        {
+            // Ошибка определения зоны — считаем путь НЕ risk-зоной.
+        }
+
+        return false;
+    }
+
+    private IEnumerable<string> EnumerateRiskFolders()
+    {
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            foreach (var raw in (_config.PreScanSuspiciousFolders ?? "")
+                         .Split(';', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var expanded = Environment.ExpandEnvironmentVariables(raw.Trim());
+                if (!string.IsNullOrWhiteSpace(expanded))
+                {
+                    set.Add(Path.GetFullPath(expanded).TrimEnd('\\'));
+                }
+            }
+        }
+        catch { /* некорректные пути пропускаем */ }
+
+        try
+        {
+            var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            if (!string.IsNullOrWhiteSpace(profile))
+            {
+                set.Add(Path.Combine(profile, "Desktop"));
+                set.Add(Path.Combine(profile, "Downloads"));
+                set.Add(Path.Combine(profile, "Documents"));
+            }
+            var pub = Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory);
+            if (!string.IsNullOrWhiteSpace(pub))
+            {
+                set.Add(pub.TrimEnd('\\'));
+            }
+        }
+        catch { /* зоны недоступны */ }
+
+        // P21 (P3): служба SYSTEM через SpecialFolder.UserProfile получает systemprofile, а НЕ
+        // профиль пользователя — Desktop/Downloads пользователя не попадали в risk-зоны, и cooldown
+        // песочницы (SandboxAlertCooldownMinutes) подавлял повторный алерт для 52725.exe на Desktop
+        // (ВМ5: «при повторном запуске нет алерта о высокорискованном процессе»). «Горячие»
+        // каталоги (Desktop/Downloads/Documents/Temp из конфига/дефолта) служба знает — добавляем.
+        try
+        {
+            var hot = _config.HotFolders is { Count: > 0 }
+                ? _config.HotFolders
+                : JsonConfiguration.DefaultHotFolders;
+            foreach (var hf in hot)
+            {
+                if (string.IsNullOrWhiteSpace(hf)) continue;
+                var expanded = Environment.ExpandEnvironmentVariables(hf);
+                if (string.IsNullOrWhiteSpace(expanded)) continue;
+                try { set.Add(Path.GetFullPath(expanded).TrimEnd('\\')); }
+                catch { /* некорректный путь — пропускаем */ }
+            }
+        }
+        catch { /* зоны недоступны */ }
+
+        return set;
+    }
+
+    private static bool IsInsideDir(string full, string dir)
+    {
+        try
+        {
+            full = Path.GetFullPath(full).TrimEnd('\\');
+            dir = Path.GetFullPath(dir).TrimEnd('\\');
+            return full.Equals(dir, StringComparison.OrdinalIgnoreCase)
+                || full.StartsWith(dir + "\\", StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private uint ActiveSessionId()
@@ -661,12 +787,24 @@ public sealed class SandboxMonitor : IDisposable
 
                         // 3.0.1.3-fix: сначала по PID; если процесс уже завершился/перезапустился
                         // (PID устарел) — фолбэк по пути exe: баннер может жить под новым PID.
-                        var killed = ProcessControl.KillForced(dto.Pid) ||
-                                     ProcessControl.KillByPath(dto.ProcessPath);
+                        // P23 (КРИТИЧЕСКОЕ): KillForced с expectedStartUtc из алерта — PID-reuse
+                        // сверка. Без неё KillForced(pid) убил бы переиспользованный легитимный
+                        // процесс (MatchesIdentity(null) = true для любого живого).
+                        // ЕСЛИ StartTimeUtc == MinValue (время не получено) — НЕ вызываем KillForced
+                        // по PID (сверка невозможна → риск убить чужой процесс): только KillByPath.
+                        var killed = (dto.StartTimeUtc != System.DateTime.MinValue
+                                      && ProcessControl.KillForced(dto.Pid, null, dto.StartTimeUtc))
+                                     || ProcessControl.KillByPath(dto.ProcessPath);
                         if (killed)
                         {
                             WriteEvent(ChangeType.Malicious, dto.ProcessPath,
                                 Tr.T("Svc2533"));
+                        }
+                        else if (!ProcessAlive(dto.Pid))
+                        {
+                            // P23: процесс уже завершился (короткоживущий дроппер) — «не удалось
+                            // завершить» вводит в заблуждение. Считаем успехом: цель достигнута.
+                            killed = true;
                         }
 
                         return (killed, 0, killed ? "" : Tr.T("Svc2535"));
@@ -844,6 +982,18 @@ public sealed class SandboxMonitor : IDisposable
         {
             return false;
         }
+    }
+
+    /// <summary>P23: жив ли процесс с PID.</summary>
+    private static bool ProcessAlive(int pid)
+    {
+        if (pid <= 0) return false;
+        try
+        {
+            using var p = System.Diagnostics.Process.GetProcessById(pid);
+            return p.Id > 0;
+        }
+        catch { return false; }
     }
 
     /// <summary>Авто-возобновление Launch Gate-процессов без вердикта (не «вешаем» ПК).
